@@ -1,0 +1,12 @@
+name: hostmetrics-nop
+collector_binary: ../otelcol-contrib
+collector_config: ./collector-hostmetrics-nop.yaml
+
+# Set to "max" for unconstrained baseline, or override via --memory-limit on the CLI.
+memory_limit: "60MiB"
+swap_max: "0"
+
+sample_interval: 500ms
+event_debounce: 50ms
+shutdown_timeout: 10s
+block_size_pages: 64
