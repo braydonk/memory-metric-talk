@@ -1,0 +1,34 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:OTEL_LAB_COLLECTOR_GRPC_ENDPOINT}
+
+processors:
+  batch:
+    timeout: 200ms
+    send_batch_size: 512
+
+exporters:
+  otlp_grpc:
+    endpoint: ${env:OTEL_LAB_BACKEND_ENDPOINT}
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc]

@@ -1,0 +1,31 @@
+name: otlp-minimal
+collector_binary: /usr/local/google/home/braydonk/Git/opentelemetry-collector-contrib/bin/otelcontribcol_linux_amd64
+collector_config: ./collector-minimal-otlp.yaml
+
+# Set to "max" for unconstrained baseline, or override via --memory-limit on the CLI.
+memory_limit: "60MiB"
+swap_max: "0"
+
+sample_interval: 500ms
+event_debounce: 50ms
+startup_timeout: 15s
+shutdown_timeout: 10s
+block_size_pages: 64
+
+backend:
+  enabled: true
+  grpc_endpoint: "127.0.0.1:14317"
+
+workload:
+  enabled: true
+  collector_grpc_endpoint: "127.0.0.1:4317"
+  signals:
+    logs:
+      rate: 1000
+      batch_size: 100
+    metrics:
+      rate: 500
+      batch_size: 100
+    traces:
+      rate: 200
+      batch_size: 50

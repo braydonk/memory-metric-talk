@@ -1,0 +1,25 @@
+receivers:
+  hostmetrics:
+    collection_interval: 1s
+    scrapers:
+      cpu: {}
+      memory: {}
+      load: {}
+      filesystem: {}
+
+processors:
+  batch:
+    timeout: 1s
+
+exporters:
+  nop: {}
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [batch]
+      exporters: [nop]
