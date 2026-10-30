@@ -43,9 +43,18 @@ type RunSummary struct {
 	ReclaimedRefaultPercent      float64 `json:"reclaimed_refault_percent"`
 	ReclaimedCleanPercent        float64 `json:"reclaimed_clean_percent"`
 	PeakCGMemoryMiB              float64 `json:"peak_cg_memory_mib"`
+	FinalCGMemoryMiB             float64 `json:"final_cg_memory_mib"`
 	PeakCGAnonMiB                float64 `json:"peak_cg_anon_mib"`
 	PeakCGFileMiB                float64 `json:"peak_cg_file_mib"`
+	FinalCGActiveFileMiB         float64 `json:"final_cg_active_file_mib"`
+	FinalCGInactiveFileMiB       float64 `json:"final_cg_inactive_file_mib"`
+	PeakCGWorkingSetMiB          float64 `json:"peak_cg_working_set_mib"`
+	FinalCGWorkingSetMiB         float64 `json:"final_cg_working_set_mib"`
+	PeakEstIsolatedWSMiB         float64 `json:"peak_est_isolated_ws_mib"`
+	FinalEstIsolatedWSMiB        float64 `json:"final_est_isolated_ws_mib"`
 	PeakProcRSSMiB               float64 `json:"peak_proc_rss_mib"`
+	FinalProcRSSMiB              float64 `json:"final_proc_rss_mib"`
+	MaxUnchargedRSSFileMiB       float64 `json:"max_uncharged_rss_file_mib"`
 	TotalColdFaults              uint64  `json:"total_cold_faults"`
 	TotalEvictions               uint64  `json:"total_evictions"`
 	TotalRefaults01              uint64  `json:"total_refaults_01"`
@@ -180,12 +189,71 @@ func buildSummary(idx int, rd *results.RunData) RunSummary {
 		limitLabel = m.MemoryLimitRaw
 	}
 
-	var lastLive results.SampleRow
-	var hasLastLive bool
-	for _, row := range rd.Samples {
+	var (
+		lastLive               results.SampleRow
+		hasLastLive            bool
+		samplePeakCGMem        uint64
+		samplePeakCGAnon       uint64
+		samplePeakCGFile       uint64
+		samplePeakCGWS         uint64
+		samplePeakIsoWS        uint64
+		samplePeakProcRSS      uint64
+		maxUnchargedRSSFile    uint64
+	)
+	for i := range rd.Samples {
+		row := &rd.Samples[i]
+		// Ensure in-memory or legacy SampleRows always carry populated Working Set fields.
+		if row.CGWorkingSetBytes == 0 && row.CGMemoryCurrentBytes > 0 {
+			row.CGWorkingSetBytes = results.KubeletWorkingSetBytes(row.CGMemoryCurrentBytes, row.CGInactiveFileBytes)
+		}
+		uncharged := results.UnchargedRSSFileBytes(row.ProcRSSFileBytes, row.CGFileBytes)
+		if row.EstIsolatedWorkingSetBytes == 0 && (row.CGWorkingSetBytes > 0 || uncharged > 0) {
+			row.EstIsolatedWorkingSetBytes = row.CGWorkingSetBytes + uncharged
+		}
+		samplePeakCGMem = max(samplePeakCGMem, row.CGMemoryCurrentBytes)
+		samplePeakCGAnon = max(samplePeakCGAnon, row.CGAnonBytes)
+		samplePeakCGFile = max(samplePeakCGFile, row.CGFileBytes)
+		samplePeakCGWS = max(samplePeakCGWS, row.CGWorkingSetBytes)
+		samplePeakIsoWS = max(samplePeakIsoWS, row.EstIsolatedWorkingSetBytes)
+		samplePeakProcRSS = max(samplePeakProcRSS, row.ProcRSSBytes)
+		maxUnchargedRSSFile = max(maxUnchargedRSSFile, uncharged)
 		if row.BinTotalPages > 0 {
-			lastLive = row
+			lastLive = *row
 			hasLastLive = true
+		}
+	}
+
+	peakCGMemBytes := max(s.PeakCGMemoryBytes, samplePeakCGMem)
+	peakCGAnonBytes := max(s.PeakCGAnonBytes, samplePeakCGAnon)
+	peakCGFileBytes := max(s.PeakCGFileBytes, samplePeakCGFile)
+	peakCGWSBytes := max(s.PeakCGWorkingSetBytes, samplePeakCGWS)
+	peakIsoWSBytes := max(s.PeakEstIsolatedWSBytes, samplePeakIsoWS)
+	peakProcRSSBytes := max(s.PeakProcRSSBytes, samplePeakProcRSS)
+
+	finalCGMemBytes := s.FinalCGMemoryBytes
+	finalCGActiveFileBytes := s.FinalCGActiveFileBytes
+	finalCGInactiveFileBytes := s.FinalCGInactiveFileBytes
+	finalCGWSBytes := s.FinalCGWorkingSetBytes
+	finalIsoWSBytes := s.FinalEstIsolatedWSBytes
+	finalProcRSSBytes := s.FinalProcRSSBytes
+	if hasLastLive {
+		if finalCGMemBytes == 0 {
+			finalCGMemBytes = lastLive.CGMemoryCurrentBytes
+		}
+		if finalCGActiveFileBytes == 0 {
+			finalCGActiveFileBytes = lastLive.CGActiveFileBytes
+		}
+		if finalCGInactiveFileBytes == 0 {
+			finalCGInactiveFileBytes = lastLive.CGInactiveFileBytes
+		}
+		if finalCGWSBytes == 0 {
+			finalCGWSBytes = lastLive.CGWorkingSetBytes
+		}
+		if finalIsoWSBytes == 0 {
+			finalIsoWSBytes = lastLive.EstIsolatedWorkingSetBytes
+		}
+		if finalProcRSSBytes == 0 {
+			finalProcRSSBytes = lastLive.ProcRSSBytes
 		}
 	}
 
@@ -255,10 +323,19 @@ func buildSummary(idx int, rd *results.RunData) RunSummary {
 		EverRefaultedBinMiB:          float64(everRefaultedPages*ps) / mib,
 		ReclaimedRefaultPercent:      reclaimedRefaultPct,
 		ReclaimedCleanPercent:        reclaimedCleanPct,
-		PeakCGMemoryMiB:              float64(s.PeakCGMemoryBytes) / mib,
-		PeakCGAnonMiB:                float64(s.PeakCGAnonBytes) / mib,
-		PeakCGFileMiB:                float64(s.PeakCGFileBytes) / mib,
-		PeakProcRSSMiB:               float64(s.PeakProcRSSBytes) / mib,
+		PeakCGMemoryMiB:              float64(peakCGMemBytes) / mib,
+		FinalCGMemoryMiB:             float64(finalCGMemBytes) / mib,
+		PeakCGAnonMiB:                float64(peakCGAnonBytes) / mib,
+		PeakCGFileMiB:                float64(peakCGFileBytes) / mib,
+		FinalCGActiveFileMiB:         float64(finalCGActiveFileBytes) / mib,
+		FinalCGInactiveFileMiB:       float64(finalCGInactiveFileBytes) / mib,
+		PeakCGWorkingSetMiB:          float64(peakCGWSBytes) / mib,
+		FinalCGWorkingSetMiB:         float64(finalCGWSBytes) / mib,
+		PeakEstIsolatedWSMiB:         float64(peakIsoWSBytes) / mib,
+		FinalEstIsolatedWSMiB:        float64(finalIsoWSBytes) / mib,
+		PeakProcRSSMiB:               float64(peakProcRSSBytes) / mib,
+		FinalProcRSSMiB:              float64(finalProcRSSBytes) / mib,
+		MaxUnchargedRSSFileMiB:       float64(maxUnchargedRSSFile) / mib,
 		TotalColdFaults:              s.TotalColdFaults,
 		TotalEvictions:               s.TotalEvictions,
 		TotalRefaults01:              s.TotalRefaults01,

@@ -82,10 +82,26 @@ type Cgroup struct {
 	eventsFD   int
 	pressureFD int
 
-	mu       sync.Mutex
-	readBuf  []byte
-	watcher  *Watcher
-	closed   bool
+	mu      sync.Mutex
+	readBuf []byte
+	watcher *Watcher
+	writeFn func(path string, data []byte) error
+	closed  bool
+}
+
+// CheckUnifiedMount verifies that cgroupRoot is mounted as a unified cgroup v2 filesystem.
+func CheckUnifiedMount(cgroupRoot string) error {
+	if cgroupRoot == "" {
+		cgroupRoot = DefaultRoot
+	}
+	var sfs unix.Statfs_t
+	if err := unix.Statfs(cgroupRoot, &sfs); err != nil {
+		return fmt.Errorf("statfs cgroup root %q: %w", cgroupRoot, err)
+	}
+	if uint64(uint32(sfs.Type)) != uint64(unix.CGROUP2_SUPER_MAGIC) {
+		return fmt.Errorf("%q is not a unified cgroup v2 mount (f_type=0x%x); cgroup v2 is required", cgroupRoot, sfs.Type)
+	}
+	return nil
 }
 
 // Create sets up /sys/fs/cgroup/mem_eviction_lab/<leaf>, enables the memory controller,
@@ -94,12 +110,8 @@ func Create(cgroupRoot, runName string, memLimit, swapMax bytefmt.Limit) (cg *Cg
 	if cgroupRoot == "" {
 		cgroupRoot = DefaultRoot
 	}
-	var sfs unix.Statfs_t
-	if err := unix.Statfs(cgroupRoot, &sfs); err != nil {
-		return nil, fmt.Errorf("statfs cgroup root %q: %w", cgroupRoot, err)
-	}
-	if uint64(uint32(sfs.Type)) != uint64(unix.CGROUP2_SUPER_MAGIC) {
-		return nil, fmt.Errorf("%q is not a unified cgroup v2 mount (f_type=0x%x); cgroup v2 is required", cgroupRoot, sfs.Type)
+	if err := CheckUnifiedMount(cgroupRoot); err != nil {
+		return nil, err
 	}
 
 	parentPath := filepath.Join(cgroupRoot, ParentDirName)
@@ -254,6 +266,90 @@ func (c *Cgroup) ReadSnapshot() (Snapshot, error) {
 	}
 
 	return snap, nil
+}
+
+// SetMemoryMax updates memory.max on the active leaf cgroup mid-run.
+// Writes run outside c.mu so synchronous kernel direct reclaim does not stall ReadSnapshot.
+func (c *Cgroup) SetMemoryMax(memLimit bytefmt.Limit) error {
+	c.mu.Lock()
+	closed := c.closed
+	leafPath := c.leafPath
+	wfn := c.writeFn
+	c.mu.Unlock()
+	if closed {
+		return errors.New("cgroup is closed")
+	}
+	if wfn == nil {
+		wfn = writeExistingFile
+	}
+	maxPath := filepath.Join(leafPath, "memory.max")
+	if err := wfn(maxPath, []byte(memLimit.String()+"\n")); err != nil {
+		return fmt.Errorf("write %s=%s: %w", maxPath, memLimit.String(), err)
+	}
+	return nil
+}
+
+// Reclaim triggers proactive one-shot kernel LRU reclaim by writing bytes to memory.reclaim (Linux 5.19+).
+// On Linux, EAGAIN indicates the kernel swept LRUs down to the reclaimable floor
+// (reclaiming fewer bytes than requested); Reclaim reports this via partial=true and err=nil.
+func (c *Cgroup) Reclaim(bytes uint64) (reclaimed uint64, partial bool, err error) {
+	if bytes == 0 {
+		return 0, false, errors.New("reclaim target bytes must be > 0")
+	}
+	before, berr := c.readCurrentBytes()
+	if berr != nil {
+		return 0, false, berr
+	}
+
+	c.mu.Lock()
+	closed := c.closed
+	leafPath := c.leafPath
+	wfn := c.writeFn
+	c.mu.Unlock()
+	if closed {
+		return 0, false, errors.New("cgroup is closed")
+	}
+	if wfn == nil {
+		wfn = writeExistingFile
+	}
+
+	recPath := filepath.Join(leafPath, "memory.reclaim")
+	werr := wfn(recPath, []byte(strconv.FormatUint(bytes, 10)+"\n"))
+	if werr != nil {
+		if errors.Is(werr, syscall.EAGAIN) {
+			partial = true
+		} else if errors.Is(werr, os.ErrNotExist) {
+			return 0, false, fmt.Errorf("%s not present (memory.reclaim requires Linux 5.19+)", recPath)
+		} else {
+			return 0, false, fmt.Errorf("write %s=%d: %w", recPath, bytes, werr)
+		}
+	}
+
+	after, aerr := c.readCurrentBytes()
+	if aerr == nil && before > after {
+		reclaimed = before - after
+	}
+	return reclaimed, partial, nil
+}
+
+func (c *Cgroup) readCurrentBytes() (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0, errors.New("cgroup is closed")
+	}
+	if c.currentFD >= 0 {
+		b, err := preadZero(c.currentFD, c.readBuf)
+		if err != nil {
+			return 0, fmt.Errorf("read memory.current: %w", err)
+		}
+		return ParseUintFile(b)
+	}
+	b, err := os.ReadFile(filepath.Join(c.leafPath, "memory.current"))
+	if err != nil {
+		return 0, fmt.Errorf("read memory.current: %w", err)
+	}
+	return ParseUintFile(b)
 }
 
 // KillAll forcefully terminates all tasks inside the leaf cgroup.

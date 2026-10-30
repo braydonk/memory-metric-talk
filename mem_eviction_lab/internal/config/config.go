@@ -86,6 +86,11 @@ func (c *Config) ParsedSwapMax() bytefmt.Limit {
 // Load reads, applies defaults, resolves paths, and validates a run YAML file.
 // If memoryLimitOverride is non-empty, it replaces memory_limit from the YAML file.
 func Load(path string, memoryLimitOverride string) (*Config, error) {
+	return LoadWithOverrides(path, memoryLimitOverride, "")
+}
+
+// LoadWithOverrides reads and validates a run YAML file with optional overrides for memory_limit and swap_max.
+func LoadWithOverrides(path, memoryLimitOverride, swapMaxOverride string) (*Config, error) {
 	absCfgPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve config path %q: %w", path, err)
@@ -104,6 +109,9 @@ func Load(path string, memoryLimitOverride string) (*Config, error) {
 
 	if strings.TrimSpace(memoryLimitOverride) != "" {
 		cfg.MemoryLimit = strings.TrimSpace(memoryLimitOverride)
+	}
+	if strings.TrimSpace(swapMaxOverride) != "" {
+		cfg.SwapMax = strings.TrimSpace(swapMaxOverride)
 	}
 
 	baseDir := filepath.Dir(absCfgPath)

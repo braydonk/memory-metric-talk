@@ -24,6 +24,59 @@ const (
 	PFNMask     = (uint64(1) << 55) - 1
 )
 
+// PageVisualCode encodes a binary page's live transition and subsequent resting visual state.
+type PageVisualCode uint8
+
+const (
+	CodeNeverFaulted      PageVisualCode = 0
+	CodeColdFaultFile     PageVisualCode = 1
+	CodeColdFaultCoW      PageVisualCode = 2
+	CodePromotedCoW       PageVisualCode = 3
+	CodeEvictedClean      PageVisualCode = 4
+	CodeEvictedRefaulted  PageVisualCode = 5
+	CodeEvictedThrashing  PageVisualCode = 6
+	CodeRefaultFileOnce   PageVisualCode = 7
+	CodeRefaultFileThrash PageVisualCode = 8
+	CodeRefaultCoW        PageVisualCode = 9
+	CodeSwappedOut        PageVisualCode = 10
+
+	// MaxDeltaPageIndex is the largest page index representable in a packed uint32 delta (28 bits = 1 TiB at 4 KiB pages).
+	MaxDeltaPageIndex = (1 << 28) - 1
+
+	// MinThrashingStreak is the minimum consecutive refault streak (without exceeding ThrashQuietWindowMs
+	// between transitions) required before an individual binary page enters the active Thrashing state.
+	// One-shot startup sweeps or a couple of manual memory.reclaim / memory.max adjustments remain in
+	// the settled Refaulted state instead of masquerading as continuous churn.
+	MinThrashingStreak = 4
+
+	// ThrashQuietWindowMs is the idle cooldown interval (in milliseconds) after which a page with zero
+	// new evictions or refaults clears its active churn streak and relaxes from Thrashing back to settled
+	// Refaulted. Sized at 15s so pages rotating through a PSI-throttled active LRU loop stay marked as
+	// thrashing while pages that stabilize after a bounded correction cool down cleanly.
+	ThrashQuietWindowMs int64 = 15_000
+)
+
+// PackDelta packs a 28-bit page index and 4-bit PageVisualCode into a single uint32.
+func PackDelta(pageIndex uint32, code PageVisualCode) uint32 {
+	return (pageIndex << 4) | uint32(code&0xF)
+}
+
+// UnpackDelta unpacks a uint32 delta produced by PackDelta.
+func UnpackDelta(v uint32) (pageIndex uint32, code PageVisualCode) {
+	return v >> 4, PageVisualCode(v & 0xF)
+}
+
+// SectionSpan describes a contiguous run of tracked binary pages with uniform ELF section,
+// VMA permissions, and step-contiguous file offsets (fileOffset(start+k) = FileOffsetBytes + k*pageSize).
+type SectionSpan struct {
+	SectionName     string `json:"section_name"`
+	VMAPerms        string `json:"vma_perms"`
+	FileOffsetBytes uint64 `json:"file_offset_bytes"`
+	SizeBytes       uint64 `json:"size_bytes"`
+	StartPage       int    `json:"start_page"`
+	PageCount       int    `json:"page_count"`
+}
+
 // Source reads contiguous 64-bit /proc/[pid]/pagemap entries beginning at vaddr.
 type Source interface {
 	ReadEntries(vaddr uint64, dst []uint64) error
@@ -110,6 +163,11 @@ type pageState struct {
 	evictCount      uint32
 	refault01Count  uint32
 	refaultPFNCount uint32
+
+	lastChurnMs     int64
+	churnStreak     uint16
+	hasChurnTime    bool
+	activeThrashing bool
 }
 
 type vmaSpan struct {
@@ -203,6 +261,46 @@ func (t *Tracker) TotalMappedBytes() uint64 {
 	return uint64(len(t.pages)) * t.pageSize
 }
 
+// PageSize returns the page size in bytes used by this Tracker.
+func (t *Tracker) PageSize() uint64 {
+	return t.pageSize
+}
+
+// BlockSizePages returns the block bucket size in pages used by BlockRows.
+func (t *Tracker) BlockSizePages() int {
+	return t.blockSizePages
+}
+
+// LayoutSpans returns contiguous runs of pages grouped by (ELF section, VMA perms, contiguous file offsets).
+// Sum of PageCount across all spans equals TotalPages().
+func (t *Tracker) LayoutSpans() []SectionSpan {
+	if len(t.pages) == 0 {
+		return nil
+	}
+	var spans []SectionSpan
+	for i := range t.pages {
+		p := &t.pages[i]
+		if len(spans) > 0 {
+			last := &spans[len(spans)-1]
+			expectedNextOff := last.FileOffsetBytes + uint64(last.PageCount)*t.pageSize
+			if last.SectionName == p.section.Name && last.VMAPerms == p.vmaPerms && p.fileOffset == expectedNextOff {
+				last.PageCount++
+				last.SizeBytes = uint64(last.PageCount) * t.pageSize
+				continue
+			}
+		}
+		spans = append(spans, SectionSpan{
+			SectionName:     p.section.Name,
+			VMAPerms:        p.vmaPerms,
+			FileOffsetBytes: p.fileOffset,
+			SizeBytes:       t.pageSize,
+			StartPage:       i,
+			PageCount:       1,
+		})
+	}
+	return spans
+}
+
 // Close closes the underlying pagemap Source.
 func (t *Tracker) Close() error {
 	if t.src == nil {
@@ -218,6 +316,17 @@ func (t *Tracker) Close() error {
 // Sample does NOT commit partial state mutations to Tracker.pages so the last complete
 // live snapshot remains intact for SectionRows and BlockRows.
 func (t *Tracker) Sample(row *results.SampleRow) error {
+	_, err := t.sample(row, false, nil)
+	return err
+}
+
+// SampleWithDeltas behaves identically to Sample while additionally appending packed uint32
+// visual transition records (PackDelta(pageIdx, code)) into deltas for pages that transitioned on this tick.
+func (t *Tracker) SampleWithDeltas(row *results.SampleRow, deltas []uint32) ([]uint32, error) {
+	return t.sample(row, true, deltas[:0])
+}
+
+func (t *Tracker) sample(row *results.SampleRow, collectDeltas bool, deltas []uint32) ([]uint32, error) {
 	// First fetch all entries before mutating state so process exit mid-read cannot corrupt
 	// the preserved final snapshot.
 	allEntries := t.entryBuf
@@ -232,7 +341,7 @@ func (t *Tracker) Sample(row *results.SampleRow) error {
 	for _, sp := range t.spans {
 		dst := allEntries[sp.pageStart : sp.pageStart+sp.pageCount]
 		if err := t.src.ReadEntries(sp.vma.StartAddr, dst); err != nil {
-			return err
+			return deltas, err
 		}
 	}
 
@@ -244,6 +353,7 @@ func (t *Tracker) Sample(row *results.SampleRow) error {
 	)
 
 	row.BinTotalPages = uint64(total)
+	elapsedMs := row.ElapsedMs
 
 	for i := range t.pages {
 		p := &t.pages[i]
@@ -257,25 +367,57 @@ func (t *Tracker) Sample(row *results.SampleRow) error {
 			pfn = entry & PFNMask
 		}
 
+		wasPresent := p.prevPresent
+		wasSwapped := p.prevSwapped
+		wasFileBacked := p.prevFileBacked
+		wasEverPresent := p.everPresent
+		wasPFN := p.prevPFN
+		wasActiveThrashing := p.activeThrashing
+		if p.hasChurnTime && elapsedMs > p.lastChurnMs && (elapsedMs-p.lastChurnMs) > ThrashQuietWindowMs {
+			p.churnStreak = 0
+			p.activeThrashing = false
+		}
+
+		didEvict := false
+		didRefault := false
+		pfnRefault := false
+
 		switch {
-		case !p.prevPresent && present:
-			if !p.everPresent {
+		case !wasPresent && present:
+			if !wasEverPresent {
 				p.everPresent = true
 				deltaColdFaults++
 			} else {
 				deltaRefaults01++
 				p.refault01Count++
+				didRefault = true
 			}
-		case p.prevPresent && !present:
+		case wasPresent && !present:
 			p.everEvicted = true
 			p.evictCount++
 			deltaEvictions++
-		case p.prevPresent && present && fileBacked && p.prevFileBacked && pfn != 0 && p.prevPFN != 0 && pfn != p.prevPFN:
+			didEvict = true
+		case wasPresent && present && fileBacked && wasFileBacked && pfn != 0 && wasPFN != 0 && pfn != wasPFN:
 			p.everEvicted = true
 			p.evictCount++
 			p.refaultPFNCount++
 			deltaEvictions++
 			deltaRefaultsPFN++
+			didEvict = true
+			didRefault = true
+			pfnRefault = true
+		}
+
+		if didRefault {
+			p.churnStreak++
+			p.lastChurnMs = elapsedMs
+			p.hasChurnTime = true
+			if p.churnStreak >= MinThrashingStreak {
+				p.activeThrashing = true
+			}
+		} else if didEvict {
+			p.lastChurnMs = elapsedMs
+			p.hasChurnTime = true
 		}
 
 		p.prevPresent = present
@@ -284,6 +426,13 @@ func (t *Tracker) Sample(row *results.SampleRow) error {
 		p.prevPFN = pfn
 
 		refaults := uint64(p.refault01Count) + uint64(p.refaultPFNCount)
+		cooledDown := wasActiveThrashing && !p.activeThrashing
+
+		if collectDeltas && uint64(i) <= MaxDeltaPageIndex {
+			if code, changed := classifyVisualDelta(wasPresent, present, wasSwapped, swapped, wasFileBacked, fileBacked, wasEverPresent, pfnRefault, refaults, p.activeThrashing, cooledDown); changed {
+				deltas = append(deltas, PackDelta(uint32(i), code))
+			}
+		}
 
 		if present {
 			if fileBacked {
@@ -311,7 +460,7 @@ func (t *Tracker) Sample(row *results.SampleRow) error {
 		if refaults >= 1 {
 			row.BinEverRefaultedPages++
 		}
-		if refaults >= 2 {
+		if p.activeThrashing {
 			row.BinThrashingPages++
 		}
 
@@ -361,7 +510,83 @@ func (t *Tracker) Sample(row *results.SampleRow) error {
 	row.CumRefaultsPFN = t.cumRefaultsPFN
 	row.CumRefaultsTotal = t.cumRefaults01 + t.cumRefaultsPFN
 
-	return nil
+	return deltas, nil
+}
+
+func classifyVisualDelta(
+	wasPresent, present bool,
+	wasSwapped, swapped bool,
+	wasFileBacked, fileBacked bool,
+	wasEverPresent bool,
+	pfnRefault bool,
+	refaults uint64,
+	activeThrashing bool,
+	cooledDown bool,
+) (PageVisualCode, bool) {
+	switch {
+	case !wasPresent && present:
+		if !wasEverPresent {
+			if fileBacked {
+				return CodeColdFaultFile, true
+			}
+			return CodeColdFaultCoW, true
+		}
+		if !fileBacked {
+			return CodeRefaultCoW, true
+		}
+		if activeThrashing {
+			return CodeRefaultFileThrash, true
+		}
+		return CodeRefaultFileOnce, true
+
+	case wasPresent && !present:
+		if swapped {
+			return CodeSwappedOut, true
+		}
+		if activeThrashing {
+			return CodeEvictedThrashing, true
+		}
+		if refaults >= 1 {
+			return CodeEvictedRefaulted, true
+		}
+		return CodeEvictedClean, true
+
+	case wasPresent && present:
+		if pfnRefault {
+			if activeThrashing {
+				return CodeRefaultFileThrash, true
+			}
+			return CodeRefaultFileOnce, true
+		}
+		if wasFileBacked && !fileBacked {
+			return CodePromotedCoW, true
+		}
+		if cooledDown {
+			if fileBacked {
+				return CodeRefaultFileOnce, true
+			}
+			return CodeRefaultCoW, true
+		}
+		return CodeNeverFaulted, false
+
+	default: // !wasPresent && !present
+		if !wasSwapped && swapped {
+			return CodeSwappedOut, true
+		}
+		if wasSwapped && !swapped && wasEverPresent {
+			if activeThrashing {
+				return CodeEvictedThrashing, true
+			}
+			if refaults >= 1 {
+				return CodeEvictedRefaulted, true
+			}
+			return CodeEvictedClean, true
+		}
+		if cooledDown && !swapped {
+			return CodeEvictedRefaulted, true
+		}
+		return CodeNeverFaulted, false
+	}
 }
 
 // SectionRows aggregates final page histories grouped by (ELF section name, VMA perms).
@@ -408,7 +633,7 @@ func (t *Tracker) SectionRows() []results.SectionRow {
 				r.EvictedAfterRefaultPages++
 			}
 		}
-		if refaults >= 2 {
+		if p.activeThrashing {
 			r.ThrashingPages++
 		}
 		r.TotalEvictions += uint64(p.evictCount)
@@ -479,7 +704,7 @@ func (t *Tracker) BlockRows() []results.BlockRow {
 		if refaults >= 1 {
 			r.EverRefaultedPages++
 		}
-		if refaults >= 2 {
+		if p.activeThrashing {
 			r.ThrashingPages++
 		}
 		r.TotalEvictions += uint64(p.evictCount)
