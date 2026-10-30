@@ -93,9 +93,11 @@
         <div class="arena-header">
           <h2 class="panel-heading">Cgroup v2 Memory Arena <span class="mono" id="arena-scale-label" style="color:var(--text-muted); font-weight:500; font-size:0.76rem;"></span></h2>
           <div class="arena-legend">
-            <span class="legend-item"><span class="swatch" style="background:var(--arena-anon)"></span>Anon (Heap/Stack) <strong class="mono" id="leg-arena-anon">0.0 MiB</strong></span>
-            <span class="legend-item"><span class="swatch" style="background:var(--arena-kernel)"></span>Kernel (Slab/PT) <strong class="mono" id="leg-arena-kernel">0.0 MiB</strong></span>
-            <span class="legend-item"><span class="swatch" style="background:var(--arena-file)"></span>File Cache (Binary) <strong class="mono" id="leg-arena-file">0.0 MiB</strong></span>
+            <span class="legend-item"><span class="swatch" style="background:var(--arena-anon)"></span>Anon <strong class="mono" id="leg-arena-anon">0.0 MiB</strong></span>
+            <span class="legend-item"><span class="swatch" style="background:var(--arena-kernel)"></span>Kernel <strong class="mono" id="leg-arena-kernel">0.0 MiB</strong></span>
+            <span class="legend-item"><span class="swatch" style="background:var(--arena-active-file)"></span>Active File (in WS) <strong class="mono" id="leg-arena-active-file">0.0 MiB</strong></span>
+            <span class="legend-item"><span class="swatch swatch-hatched"></span>Inactive File (excl.) <strong class="mono" id="leg-arena-inactive-file">0.0 MiB</strong></span>
+            <span class="legend-item"><span class="swatch" style="background:var(--arena-ws)"></span>Kubelet WS <strong class="mono" id="leg-arena-ws">0.0 MiB</strong></span>
             <span class="legend-item"><span class="swatch" style="background:var(--arena-limit)"></span>memory.max <strong class="mono" id="leg-arena-limit">—</strong></span>
           </div>
         </div>
@@ -104,7 +106,14 @@
           <div class="arena-stack">
             <div class="arena-seg arena-seg-anon" id="arena-seg-anon"></div>
             <div class="arena-seg arena-seg-kernel" id="arena-seg-kernel"></div>
-            <div class="arena-seg arena-seg-file" id="arena-seg-file"></div>
+            <div class="arena-seg arena-seg-active-file" id="arena-seg-active-file"></div>
+            <div class="arena-seg arena-seg-inactive-file" id="arena-seg-inactive-file"></div>
+          </div>
+          <div class="arena-ws-marker" id="arena-ws-line" style="display:none;">
+            <span class="arena-ws-tag" id="arena-ws-tag">Kubelet WS</span>
+          </div>
+          <div class="arena-iso-marker" id="arena-iso-ws-line" style="display:none;">
+            <span class="arena-iso-tag" id="arena-iso-ws-tag">Est. Iso WS</span>
           </div>
           <div class="arena-limit-marker" id="arena-limit-line" style="display:none;">
             <span class="arena-limit-tag" id="arena-limit-tag">limit</span>
@@ -116,6 +125,11 @@
             <span class="kpi-label">Cgroup Memory</span>
             <span class="kpi-value" id="kpi-cg-cur">—</span>
             <span class="kpi-sub" id="kpi-cg-sub">limit: —</span>
+          </div>
+          <div class="kpi-cell kpi-cell-ws">
+            <span class="kpi-label" title="Exact cgroup v2 working_set_bytes = max(0, memory.current - inactive_file) side-by-side with Estimated Isolated-Pod Working Set (+ uncharged RssFile)">Kubelet Working Set</span>
+            <span class="kpi-value kpi-value-split" id="kpi-cg-ws">—</span>
+            <span class="kpi-sub" id="kpi-cg-ws-sub">VmRSS: — · Inact: —</span>
           </div>
           <div class="kpi-cell">
             <span class="kpi-label">Binary Resident</span>
@@ -189,7 +203,14 @@
               <option value="2">2.0×</option>
             </select>
           </div>
-          <div class="mono" id="timeline-frame-label" style="font-size:0.78rem; color:var(--text-secondary);">Frame 0 / 0 · t = 0.00s</div>
+          <div class="timeline-right-meta">
+            <span class="spark-legend">
+              <span class="spark-key"><span class="spark-line-swatch spark-sw-ws"></span>Kubelet WS</span>
+              <span class="spark-key"><span class="spark-line-swatch spark-sw-cur"></span>memory.current</span>
+              <span class="spark-key" id="spark-key-iso" style="display:none;"><span class="spark-line-swatch spark-sw-iso"></span>Est. Iso WS</span>
+            </span>
+            <div class="mono" id="timeline-frame-label" style="font-size:0.78rem; color:var(--text-secondary);">Frame 0 / 0 · t = 0.00s</div>
+          </div>
         </div>
 
         <div class="timeline-box">

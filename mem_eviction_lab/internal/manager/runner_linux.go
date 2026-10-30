@@ -261,6 +261,7 @@ func Run(ctx context.Context, opts Options, logger *log.Logger) (retErr error) {
 		if snap, serr := cg.ReadSnapshot(); serr == nil {
 			fillCgroupFields(&row, snap)
 		}
+		row.PopulateWorkingSet()
 		summaryAcc.observe(row, pageSize)
 		samples = append(samples, row)
 		if resWriter != nil {
@@ -333,6 +334,7 @@ func Run(ctx context.Context, opts Options, logger *log.Logger) (retErr error) {
 			row.ProcHWMBytes = pst.VmHWMBytes
 			row.ProcSwapBytes = pst.VmSwapBytes
 		}
+		row.PopulateWorkingSet()
 		if trig == results.TriggerReclaimEvent || trig == results.TriggerReclaimDebounced {
 			reclaimEventSamples++
 		}
@@ -637,13 +639,15 @@ func fillCgroupFields(row *results.SampleRow, snap cgroup.Snapshot) {
 }
 
 type summaryAccumulator struct {
-	peakBinResidentBytes uint64
-	peakCGMemoryBytes    uint64
-	peakCGAnonBytes      uint64
-	peakCGFileBytes      uint64
-	peakProcRSSBytes     uint64
-	lastLiveSample       results.SampleRow
-	hasLiveSample        bool
+	peakBinResidentBytes   uint64
+	peakCGMemoryBytes      uint64
+	peakCGAnonBytes        uint64
+	peakCGFileBytes        uint64
+	peakCGWorkingSetBytes  uint64
+	peakEstIsolatedWSBytes uint64
+	peakProcRSSBytes       uint64
+	lastLiveSample         results.SampleRow
+	hasLiveSample          bool
 }
 
 func (a *summaryAccumulator) observe(r results.SampleRow, pageSize uint64) {
@@ -659,6 +663,20 @@ func (a *summaryAccumulator) observe(r results.SampleRow, pageSize uint64) {
 	}
 	if r.CGFileBytes > a.peakCGFileBytes {
 		a.peakCGFileBytes = r.CGFileBytes
+	}
+	ws := r.CGWorkingSetBytes
+	if ws == 0 && r.CGMemoryCurrentBytes > 0 {
+		ws = results.KubeletWorkingSetBytes(r.CGMemoryCurrentBytes, r.CGInactiveFileBytes)
+	}
+	if ws > a.peakCGWorkingSetBytes {
+		a.peakCGWorkingSetBytes = ws
+	}
+	isoWS := r.EstIsolatedWorkingSetBytes
+	if isoWS == 0 && (ws > 0 || r.ProcRSSFileBytes > 0) {
+		isoWS = ws + results.UnchargedRSSFileBytes(r.ProcRSSFileBytes, r.CGFileBytes)
+	}
+	if isoWS > a.peakEstIsolatedWSBytes {
+		a.peakEstIsolatedWSBytes = isoWS
 	}
 	if r.ProcRSSBytes > a.peakProcRSSBytes {
 		a.peakProcRSSBytes = r.ProcRSSBytes
@@ -682,21 +700,30 @@ func (a *summaryAccumulator) finalize(
 	stoppedByUser bool,
 ) results.FinalSummary {
 	s := results.FinalSummary{
-		PeakBinResidentBytes: a.peakBinResidentBytes,
-		PeakCGMemoryBytes:    a.peakCGMemoryBytes,
-		PeakCGAnonBytes:      a.peakCGAnonBytes,
-		PeakCGFileBytes:      a.peakCGFileBytes,
-		PeakProcRSSBytes:     a.peakProcRSSBytes,
+		PeakBinResidentBytes:   a.peakBinResidentBytes,
+		PeakCGMemoryBytes:      a.peakCGMemoryBytes,
+		PeakCGAnonBytes:        a.peakCGAnonBytes,
+		PeakCGFileBytes:        a.peakCGFileBytes,
+		PeakCGWorkingSetBytes:  a.peakCGWorkingSetBytes,
+		PeakEstIsolatedWSBytes: a.peakEstIsolatedWSBytes,
+		PeakProcRSSBytes:       a.peakProcRSSBytes,
 	}
 
 	if a.hasLiveSample {
 		last := a.lastLiveSample
+		last.PopulateWorkingSet()
 		s.FinalBinResidentBytes = (last.BinPresentFilePages + last.BinPresentCoWPages) * pageSize
 		s.EverFaultedBinBytes = last.BinEverFaultedPages * pageSize
 		s.CleanlyEvictedBinBytes = last.BinCleanlyEvictedPages * pageSize
 		if last.BinEverFaultedPages > 0 {
 			s.CleanReclaimPercentOfFaulted = 100.0 * float64(last.BinCleanlyEvictedPages) / float64(last.BinEverFaultedPages)
 		}
+		s.FinalCGMemoryBytes = last.CGMemoryCurrentBytes
+		s.FinalCGActiveFileBytes = last.CGActiveFileBytes
+		s.FinalCGInactiveFileBytes = last.CGInactiveFileBytes
+		s.FinalCGWorkingSetBytes = last.CGWorkingSetBytes
+		s.FinalEstIsolatedWSBytes = last.EstIsolatedWorkingSetBytes
+		s.FinalProcRSSBytes = last.ProcRSSBytes
 		s.TotalColdFaults = last.CumColdFaults
 		s.TotalEvictions = last.CumEvictions
 		s.TotalRefaults01 = last.CumRefaults01

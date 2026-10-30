@@ -454,11 +454,25 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         </div>
 
         <div class="guide-group">
-          <div class="guide-group-title">Collector Binary Tracking &mdash; Userspace pagemap (Columns 4&ndash;7)</div>
+          <div class="guide-group-title">Kubernetes Pod Eviction Accounting &mdash; Cgroup v2 + procfs (Column 4)</div>
+          <div class="guide-grid">
+            <div class="guide-item guide-item-wide">
+              <div class="guide-item-head">
+                <span class="guide-col-title"><span class="col-num">#4</span><strong>Kubelet Working Set</strong></span>
+                <span class="source-tag">memory.current &minus; inactive_file | proc_rss_file</span>
+              </div>
+              <div>Simulates exact Kubernetes <code>container_memory_working_set_bytes = max(0, memory.current &minus; memory.stat[inactive_file])</code> (<strong>Peak &rarr; Final</strong>) side by side with <strong>Est. Isolated-Pod WS</strong> (<code>+ max(0, proc_rss_file &minus; cg_file)</code>) and final <strong>Process VmRSS</strong>.</div>
+              <div class="guide-tip">Why it matters for pod evictions: inside <code>VmRSS = RssAnon + RssFile + RssShmem</code>, binary pages on <code>inactive_file</code> are excluded by Kubelet, whereas binary pages on <strong><code>active_file</code></strong> (plus cgroup <code>kernel</code> slab/page-tables omitted from <code>VmRSS</code>) count directly toward <code>kubectl top pod</code> and Kubelet <code>memory.available</code> eviction ranking. Unlike <code>memory.max</code>, Kubelet polls asynchronously without reclaiming the pod first &mdash; so cold startup binary bloat left in <code>active_file</code> keeps eviction risk elevated until pressure ages those pages out. When host/shared page cache prevents first-touch cgroup charging (<code>proc_rss_file &gt; cg_file</code>), <strong>Iso</strong> shows the upper-bound Working Set an isolated single-pod cgroup would carry prior to LRU aging.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="guide-group">
+          <div class="guide-group-title">Collector Binary Tracking &mdash; Userspace pagemap (Columns 5&ndash;8)</div>
           <div class="guide-grid">
             <div class="guide-item">
               <div class="guide-item-head">
-                <span class="guide-col-title"><span class="col-num">#4</span><strong>Peak &rarr; Final Binary</strong></span>
+                <span class="guide-col-title"><span class="col-num">#5</span><strong>Peak &rarr; Final Binary</strong></span>
                 <span class="source-tag">/proc/&lt;pid&gt;/maps + pagemap (PM_PRESENT)</span>
               </div>
               <div>Highest sampled resident Collector ELF footprint (<strong>Peak</strong>) vs. resident binary footprint on the final live sample (<strong>Final</strong>), covering clean file pages (<code>.text</code>, <code>.rodata</code>) and private CoW <code>.data</code> pages.</div>
@@ -466,7 +480,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
             </div>
             <div class="guide-item">
               <div class="guide-item-head">
-                <span class="guide-col-title"><span class="col-num">#5</span><strong>Cleanly Evicted</strong></span>
+                <span class="guide-col-title"><span class="col-num">#6</span><strong>Cleanly Evicted</strong></span>
                 <span class="source-tag">/proc/&lt;pid&gt;/pagemap state machine</span>
               </div>
               <div>Binary memory faulted in at least once, subsequently evicted, and <strong>never faulted back in</strong> (<code>0</code> refaults) through the end of the run. Parentheses show <code>cleanly_evicted / ever_faulted_binary</code>.</div>
@@ -474,7 +488,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
             </div>
             <div class="guide-item">
               <div class="guide-item-head">
-                <span class="guide-col-title"><span class="col-num">#6</span><strong>Reclaimed Refault %</strong></span>
+                <span class="guide-col-title"><span class="col-num">#7</span><strong>Reclaimed Refault %</strong></span>
                 <span class="source-tag">ever_refaulted / ever_evicted pages</span>
               </div>
               <div>Percentage of unique evicted binary pages (<code>ever_evicted = cleanly_evicted + ever_refaulted</code>) that had to fault back into RAM at least once. Subtext shows <code>refaulted MiB / unique reclaimed MiB</code>.</div>
@@ -482,7 +496,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
             </div>
             <div class="guide-item">
               <div class="guide-item-head">
-                <span class="guide-col-title"><span class="col-num">#7</span><strong>Binary Refaults (0&rarr;1 / PFN)</strong></span>
+                <span class="guide-col-title"><span class="col-num">#8</span><strong>Binary Refaults (0&rarr;1 / PFN)</strong></span>
                 <span class="source-tag">/proc/&lt;pid&gt;/pagemap (PM_PRESENT, PM_FILE, PFN)</span>
               </div>
               <div>Sampled count of times an evicted 4 KiB Collector binary page had to be paged back into RAM (<code>total = 0&rarr;1 + PFN</code>): <strong>0&rarr;1</strong> caught the page absent (<code>0</code>) then resident (<code>1</code>) on a later poll; <strong>PFN</strong> saw a clean file page stay resident (<code>1</code>) across consecutive polls at a new physical Page Frame Number (sub-poll evict + refault).</div>
@@ -492,11 +506,11 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         </div>
 
         <div class="guide-group">
-          <div class="guide-group-title">Kernel Reclaim &amp; Pressure &mdash; Cgroup v2 (Columns 8&ndash;10)</div>
+          <div class="guide-group-title">Kernel Reclaim &amp; Pressure &mdash; Cgroup v2 (Columns 9&ndash;11)</div>
           <div class="guide-grid">
             <div class="guide-item">
               <div class="guide-item-head">
-                <span class="guide-col-title"><span class="col-num">#8</span><strong>Kernel Refaults</strong></span>
+                <span class="guide-col-title"><span class="col-num">#9</span><strong>Kernel Refaults</strong></span>
                 <span class="source-tag">memory.stat: workingset_refault_file</span>
               </div>
               <div>Exact kernel shadow-entry count (<code>mm/workingset.c</code>) of evicted file-backed pages in this cgroup that refaulted within the active/inactive LRU distance window.</div>
@@ -504,7 +518,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
             </div>
             <div class="guide-item">
               <div class="guide-item-head">
-                <span class="guide-col-title"><span class="col-num">#9</span><strong>Major Faults</strong></span>
+                <span class="guide-col-title"><span class="col-num">#10</span><strong>Major Faults</strong></span>
                 <span class="source-tag">memory.stat: pgmajfault</span>
               </div>
               <div>Total cgroup major page faults (<code>VM_FAULT_MAJOR</code>) requiring synchronous filesystem/disk I/O because the target folio was missing from page cache.</div>
@@ -512,7 +526,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
             </div>
             <div class="guide-item">
               <div class="guide-item-head">
-                <span class="guide-col-title"><span class="col-num">#10</span><strong>PSI Full Stall</strong></span>
+                <span class="guide-col-title"><span class="col-num">#11</span><strong>PSI Full Stall</strong></span>
                 <span class="source-tag">memory.pressure: full total=</span>
               </div>
               <div>Cumulative wall-clock milliseconds during which <strong>all</strong> non-idle Collector threads were simultaneously blocked on memory reclaim or disk refault I/O.</div>
@@ -522,11 +536,11 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         </div>
 
         <div class="guide-group">
-          <div class="guide-group-title">Telemetry Sampling (Column 11)</div>
+          <div class="guide-group-title">Telemetry Sampling (Column 12)</div>
           <div class="guide-grid">
             <div class="guide-item">
               <div class="guide-item-head">
-                <span class="guide-col-title"><span class="col-num">#11</span><strong>Samples (Reclaim)</strong></span>
+                <span class="guide-col-title"><span class="col-num">#12</span><strong>Samples (Reclaim)</strong></span>
                 <span class="source-tag">epoll(memory.events) + 500ms ticker</span>
               </div>
               <div>Total <code>pagemap</code> + cgroup snapshots collected, with parentheses showing how many were woken directly by cgroup reclaim (<code>memory.events</code> <code>EPOLLPRI</code> bursts coalesced at <code>50 ms</code> debounce) vs. the <code>500 ms</code> heartbeat.</div>
@@ -544,6 +558,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
             <th tabindex="0" data-tip="Experiment name and directory (run_meta.json). Sorted from Unlimited (max) down to tightest limit; click any row to inspect it below.">Run</th>
             <th tabindex="0" data-tip="Hard cgroup v2 memory.max cap applied before execve (with memory.swap.max=0 by default so reclaim targets file-backed binary pages).">Memory Limit</th>
             <th tabindex="0" data-tip="Automated classifyVerdict() result across OOM events, exit code, binary page refaults, and PSI full memory stall.">Outcome</th>
+            <th tabindex="0" data-tip="Simulated Kubelet cgroup v2 working_set_bytes = max(0, memory.current &minus; inactive_file) (Peak &rarr; Final), shown alongside Est. Isolated-Pod WS (+ uncharged RssFile when host page cache owned binary pages) and final Process VmRSS.">Kubelet Working Set</th>
             <th tabindex="0" data-tip="Highest sampled vs. final resident Collector binary memory from /proc/&lt;pid&gt;/pagemap (PM_PRESENT clean file + CoW pages).">Peak &rarr; Final Binary</th>
             <th tabindex="0" data-tip="Collector binary memory faulted in once, evicted by reclaim, and never needed again (0 refaults). Parentheses: % of ever-faulted binary pages (conservative lower bound on startup-only bloat).">Cleanly Evicted</th>
             <th tabindex="0" data-tip="Percentage of unique evicted binary pages that had to fault back in at least once (ever_refaulted / ever_evicted). Near 0% means only dead startup bloat was evicted.">Reclaimed Refault %</th>
@@ -560,6 +575,10 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
     <div class="card chart-full">
       <h3>Clean Eviction vs Page-Thrashing Cliff Across Memory Limits</h3>
       <div id="chart-multi-cliff" class="chart-box"></div>
+    </div>
+    <div class="card chart-full">
+      <h3>Simulated Kubelet Working Set Over Time Across Memory Limits (MiB)</h3>
+      <div id="chart-multi-ws" class="chart-box"></div>
     </div>
     <div class="chart-grid">
       <div class="card">
@@ -589,7 +608,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
 
     <div class="chart-grid">
       <div class="card">
-        <h3>Cgroup Memory Composition vs Limit (MiB)</h3>
+        <h3>Cgroup Memory Composition &amp; Kubelet Working Set vs Limit (MiB)</h3>
         <div id="chart-cg-stack" class="chart-box"></div>
       </div>
       <div class="card">
@@ -766,10 +785,18 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
           ? fmtReclaimedRefaultHTML(s.ever_evicted_pages, s.reclaimed_refault_percent) +
             '<div class="subtle">' + fmtMiB(s.ever_refaulted_bin_mib) + ' / ' + fmtMiB(s.ever_evicted_bin_mib) + '</div>'
           : '<span class="subtle">&mdash; (0 evicted)</span>';
+        const isoDiverged = s.max_uncharged_rss_file_mib >= 1.0;
+        const isoLine = 'Iso: ' + fmtMiB(s.peak_est_isolated_ws_mib) + ' &rarr; ' + fmtMiB(s.final_est_isolated_ws_mib);
+        const wsCell =
+          fmtMiB(s.peak_cg_working_set_mib) + ' &rarr; <strong>' + fmtMiB(s.final_cg_working_set_mib) + '</strong>' +
+          '<div class="subtle">' +
+          (isoDiverged ? '<span class="pct-warn">' + isoLine + '</span>' : isoLine) +
+          ' &middot; VmRSS ' + fmtMiB(s.final_proc_rss_mib) + '</div>';
         tr.innerHTML =
           '<td><strong>' + s.name + '</strong><div class="subtle">' + s.dir + '</div></td>' +
           '<td>' + s.memory_limit_human + '</td>' +
           '<td>' + badgeHTML(s.verdict) + '</td>' +
+          '<td>' + wsCell + '</td>' +
           '<td>' + fmtMiB(s.peak_bin_resident_mib) + ' &rarr; <strong>' + fmtMiB(s.final_bin_resident_mib) + '</strong></td>' +
           '<td>' + fmtMiB(s.cleanly_evicted_bin_mib) + ' <span class="subtle">(' + s.clean_reclaim_percent_of_faulted.toFixed(1) + '%)</span></td>' +
           '<td>' + reclaimedCell + '</td>' +
@@ -870,6 +897,38 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         });
       };
 
+      const sampleCGWS = (s) => Math.max(0, (s.cg_memory_current_bytes || 0) - (s.cg_inactive_file_bytes || 0));
+      const sampleIsoWS = (s) => sampleCGWS(s) + Math.max(0, (s.proc_rss_file_bytes || 0) - (s.cg_file_bytes || 0));
+
+      const wsSeries = [];
+      PAYLOAD.runs.forEach((r, idx) => {
+        const sum = PAYLOAD.summaries[idx];
+        wsSeries.push({
+          name: sum.label + ' (Cgroup WS)',
+          type: 'line',
+          showSymbol: false,
+          lineStyle: { width: 2.2 },
+          data: r.samples.map(s => [+(s.elapsed_ms / 1000).toFixed(3), +(sampleCGWS(s) / MIB).toFixed(2)])
+        });
+        if (sum.max_uncharged_rss_file_mib >= 1.0) {
+          wsSeries.push({
+            name: sum.label + ' (Est. Isolated WS)',
+            type: 'line',
+            showSymbol: false,
+            lineStyle: { width: 1.8, type: 'dashed' },
+            data: r.samples.map(s => [+(s.elapsed_ms / 1000).toFixed(3), +(sampleIsoWS(s) / MIB).toFixed(2)])
+          });
+        }
+      });
+      getChart('chart-multi-ws').setOption({
+        tooltip: baseTooltip('axis'),
+        legend: baseLegend(),
+        grid: { left: 56, right: 24, top: 48, bottom: 36 },
+        xAxis: { type: 'value', name: 's', nameTextStyle: { color: '#94a3b8' }, ...baseAxisStyle() },
+        yAxis: { type: 'value', name: 'MiB', nameTextStyle: { color: '#94a3b8' }, ...baseAxisStyle() },
+        series: wsSeries
+      });
+
       makeOverlay('chart-multi-cgmem', 'MiB', (s) => +(s.cg_memory_current_bytes / MIB).toFixed(2));
       makeOverlay('chart-multi-binres', 'MiB', (s, ps) => +(((s.bin_present_file_pages + s.bin_present_cow_pages) * ps) / MIB).toFixed(2));
       makeOverlay('chart-multi-refaults', 'Pages', (s) => s.cum_refaults_total);
@@ -914,7 +973,13 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         {
           label: 'Cgroup Memory Limit',
           val: sum.memory_limit_human,
-          sub: 'swap.max=' + meta.swap_max_raw + ' | peak cgroup ' + fmtMiB(sum.peak_cg_memory_mib)
+          sub: 'swap.max=' + meta.swap_max_raw + ' | peak -> final cgroup ' + fmtMiB(sum.peak_cg_memory_mib) + ' -> ' + fmtMiB(sum.final_cg_memory_mib)
+        },
+        {
+          label: 'Kubelet Working Set (Peak -> Final)',
+          val: fmtMiB(sum.peak_cg_working_set_mib) + ' -> ' + fmtMiB(sum.final_cg_working_set_mib),
+          sub: 'Iso WS: ' + fmtMiB(sum.peak_est_isolated_ws_mib) + ' -> ' + fmtMiB(sum.final_est_isolated_ws_mib) +
+            ' | final VmRSS ' + fmtMiB(sum.final_proc_rss_mib) + ' (Inact -' + fmtMiB(sum.final_cg_inactive_file_mib) + ')'
         },
         {
           label: 'Mapped Binary Size',
@@ -974,7 +1039,17 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       const zipT = (arr) => t.map((x, i) => [x, arr[i]]);
       const pagesToMiB = (p) => +((p * ps) / MIB).toFixed(3);
 
-      // 1. Cgroup Memory Composition vs Limit
+      // 1. Cgroup Memory Composition & Kubelet Working Set vs Limit
+      const cgWSof = (s) => Math.max(0, (s.cg_memory_current_bytes || 0) - (s.cg_inactive_file_bytes || 0));
+      const isoWSof = (s) => cgWSof(s) + Math.max(0, (s.proc_rss_file_bytes || 0) - (s.cg_file_bytes || 0));
+      const actFileOf = (s) => {
+        const act = s.cg_active_file_bytes || 0;
+        const inact = s.cg_inactive_file_bytes || 0;
+        const f = s.cg_file_bytes || 0;
+        // Fallback when synthetic samples specify cg_file_bytes without active/inactive split.
+        if (act === 0 && inact === 0 && f > 0) return f;
+        return act;
+      };
       const limitLine = meta.memory_limit_unlimited ? [] : [{
         yAxis: +(meta.memory_limit_bytes / MIB).toFixed(2),
         name: 'memory.max',
@@ -984,7 +1059,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       getChart('chart-cg-stack').setOption({
         tooltip: baseTooltip('axis'),
         legend: baseLegend(),
-        grid: { left: 56, right: 24, top: 44, bottom: 36 },
+        grid: { left: 56, right: 24, top: 52, bottom: 36 },
         xAxis: { type: 'value', name: 's', ...baseAxisStyle() },
         yAxis: { type: 'value', name: 'MiB', ...baseAxisStyle() },
         series: [
@@ -995,26 +1070,42 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
             data: zipT(samples.map(s => +(s.cg_anon_bytes / MIB).toFixed(2)))
           },
           {
-            name: 'File (Page Cache)',
-            type: 'line', stack: 'cg', areaStyle: { opacity: 0.35 }, showSymbol: false,
-            itemStyle: { color: '#38bdf8' },
-            data: zipT(samples.map(s => +(s.cg_file_bytes / MIB).toFixed(2)))
-          },
-          {
             name: 'Kernel',
             type: 'line', stack: 'cg', areaStyle: { opacity: 0.35 }, showSymbol: false,
             itemStyle: { color: '#64748b' },
             data: zipT(samples.map(s => +(s.cg_kernel_bytes / MIB).toFixed(2)))
           },
           {
+            name: 'Active File (In Kubelet WS)',
+            type: 'line', stack: 'cg', areaStyle: { opacity: 0.42 }, showSymbol: false,
+            itemStyle: { color: '#38bdf8' },
+            data: zipT(samples.map(s => +(actFileOf(s) / MIB).toFixed(2)))
+          },
+          {
+            name: 'Inactive File (Excl. from WS)',
+            type: 'line', stack: 'cg', areaStyle: { opacity: 0.18 }, showSymbol: false,
+            itemStyle: { color: '#475569' },
+            data: zipT(samples.map(s => +((s.cg_inactive_file_bytes || 0) / MIB).toFixed(2)))
+          },
+          {
+            name: 'Kubelet Working Set (Cgroup)',
+            type: 'line', showSymbol: false, lineStyle: { width: 2.5, color: '#34d399' }, itemStyle: { color: '#34d399' },
+            data: zipT(samples.map(s => +(cgWSof(s) / MIB).toFixed(2)))
+          },
+          {
+            name: 'Est. Isolated-Pod WS',
+            type: 'line', showSymbol: false, lineStyle: { width: 2, type: 'dashed', color: '#22d3ee' }, itemStyle: { color: '#22d3ee' },
+            data: zipT(samples.map(s => +(isoWSof(s) / MIB).toFixed(2)))
+          },
+          {
             name: 'memory.current',
-            type: 'line', showSymbol: false, lineStyle: { width: 2, color: '#f8fafc' }, itemStyle: { color: '#f8fafc' },
+            type: 'line', showSymbol: false, lineStyle: { width: 1.5, color: '#f8fafc' }, itemStyle: { color: '#f8fafc' },
             data: zipT(samples.map(s => +(s.cg_memory_current_bytes / MIB).toFixed(2))),
             markLine: limitLine.length ? { symbol: 'none', data: limitLine } : undefined
           },
           {
             name: 'Process VmRSS',
-            type: 'line', showSymbol: false, lineStyle: { width: 1.5, type: 'dotted', color: '#4ade80' }, itemStyle: { color: '#4ade80' },
+            type: 'line', showSymbol: false, lineStyle: { width: 1.5, type: 'dotted', color: '#fbbf24' }, itemStyle: { color: '#fbbf24' },
             data: zipT(samples.map(s => +(s.proc_rss_bytes / MIB).toFixed(2)))
           }
         ]

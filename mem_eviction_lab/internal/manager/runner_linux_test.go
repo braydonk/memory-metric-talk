@@ -332,3 +332,66 @@ func TestValidateOptionsAndWebSampleInterval(t *testing.T) {
 		t.Fatalf("tailBuffer = %q; want %q", got, "o world!")
 	}
 }
+
+func TestSummaryAccumulatorWorkingSet(t *testing.T) {
+	const mibB = 1024 * 1024
+	var acc summaryAccumulator
+
+	s1 := results.SampleRow{
+		ElapsedMs:            500,
+		BinTotalPages:        1000,
+		BinPresentFilePages:  600,
+		BinEverFaultedPages:  600,
+		CGMemoryCurrentBytes: 120 * mibB,
+		CGAnonBytes:          20 * mibB,
+		CGKernelBytes:        2 * mibB,
+		CGFileBytes:          98 * mibB,
+		CGActiveFileBytes:    90 * mibB,
+		CGInactiveFileBytes:  8 * mibB,
+		ProcRSSBytes:         115 * mibB,
+		ProcRSSAnonBytes:     20 * mibB,
+		ProcRSSFileBytes:     95 * mibB,
+	}
+	s1.PopulateWorkingSet()
+
+	s2 := results.SampleRow{
+		ElapsedMs:              5000,
+		BinTotalPages:          1000,
+		BinPresentFilePages:    150,
+		BinCleanlyEvictedPages: 450,
+		BinEverFaultedPages:    600,
+		CumEvictions:           450,
+		CGMemoryCurrentBytes:   105 * mibB,
+		CGAnonBytes:            70 * mibB,
+		CGKernelBytes:          3 * mibB,
+		CGFileBytes:            32 * mibB,
+		CGActiveFileBytes:      12 * mibB,
+		CGInactiveFileBytes:    20 * mibB,
+		ProcRSSBytes:           130 * mibB,
+		ProcRSSAnonBytes:       70 * mibB,
+		ProcRSSFileBytes:       60 * mibB, // 28 MiB uncharged foreign RssFile
+	}
+	s2.PopulateWorkingSet()
+
+	samples := []results.SampleRow{s1, s2}
+	for _, r := range samples {
+		acc.observe(r, 4096)
+	}
+	final := acc.finalize(samples, 0, cgroup.Snapshot{}, false, 4096, false, false, 0, nil, false)
+
+	// s1: CG WS = 112 MiB, Iso WS = 112 MiB
+	// s2: CG WS = 85 MiB,  Iso WS = 85 + 28 = 113 MiB
+	if final.PeakCGWorkingSetBytes != 112*mibB || final.FinalCGWorkingSetBytes != 85*mibB {
+		t.Fatalf("CG WS peak/final = (%d, %d); want (%d, %d)",
+			final.PeakCGWorkingSetBytes, final.FinalCGWorkingSetBytes, 112*mibB, 85*mibB)
+	}
+	if final.PeakEstIsolatedWSBytes != 113*mibB || final.FinalEstIsolatedWSBytes != 113*mibB {
+		t.Fatalf("Iso WS peak/final = (%d, %d); want (%d, %d)",
+			final.PeakEstIsolatedWSBytes, final.FinalEstIsolatedWSBytes, 113*mibB, 113*mibB)
+	}
+	if final.FinalCGActiveFileBytes != 12*mibB || final.FinalCGInactiveFileBytes != 20*mibB || final.FinalProcRSSBytes != 130*mibB {
+		t.Fatalf("final active/inactive/rss = (%d, %d, %d); want (%d, %d, %d)",
+			final.FinalCGActiveFileBytes, final.FinalCGInactiveFileBytes, final.FinalProcRSSBytes,
+			12*mibB, 20*mibB, 130*mibB)
+	}
+}

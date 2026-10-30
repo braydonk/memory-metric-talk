@@ -174,16 +174,25 @@
     arenaScaleLabel: document.getElementById("arena-scale-label"),
     legArenaAnon: document.getElementById("leg-arena-anon"),
     legArenaKernel: document.getElementById("leg-arena-kernel"),
-    legArenaFile: document.getElementById("leg-arena-file"),
+    legArenaActiveFile: document.getElementById("leg-arena-active-file"),
+    legArenaInactiveFile: document.getElementById("leg-arena-inactive-file"),
+    legArenaWs: document.getElementById("leg-arena-ws"),
     legArenaLimit: document.getElementById("leg-arena-limit"),
     segAnon: document.getElementById("arena-seg-anon"),
     segKernel: document.getElementById("arena-seg-kernel"),
-    segFile: document.getElementById("arena-seg-file"),
+    segActiveFile: document.getElementById("arena-seg-active-file"),
+    segInactiveFile: document.getElementById("arena-seg-inactive-file"),
+    wsLine: document.getElementById("arena-ws-line"),
+    wsTag: document.getElementById("arena-ws-tag"),
+    isoWsLine: document.getElementById("arena-iso-ws-line"),
+    isoWsTag: document.getElementById("arena-iso-ws-tag"),
     limitLine: document.getElementById("arena-limit-line"),
     limitTag: document.getElementById("arena-limit-tag"),
 
     kpiCgCur: document.getElementById("kpi-cg-cur"),
     kpiCgSub: document.getElementById("kpi-cg-sub"),
+    kpiCgWs: document.getElementById("kpi-cg-ws"),
+    kpiCgWsSub: document.getElementById("kpi-cg-ws-sub"),
     kpiBinRes: document.getElementById("kpi-bin-res"),
     kpiBinSub: document.getElementById("kpi-bin-sub"),
     kpiCleanEvict: document.getElementById("kpi-clean-evict"),
@@ -216,6 +225,7 @@
     btnStepPrev: document.getElementById("btn-step-prev"),
     btnStepNext: document.getElementById("btn-step-next"),
     selectSpeed: document.getElementById("select-replay-speed"),
+    sparkKeyIso: document.getElementById("spark-key-iso"),
     frameLabel: document.getElementById("timeline-frame-label"),
     sparkCanvas: document.getElementById("timeline-spark-canvas"),
     slider: document.getElementById("timeline-slider"),
@@ -249,6 +259,26 @@
     if (!p) return "—";
     const idx = p.lastIndexOf("/");
     return idx >= 0 ? p.slice(idx + 1) : p;
+  }
+
+  // Exact Kubernetes cgroup v2 container working_set_bytes = max(0, memory.current - inactive_file).
+  function calcCgroupWS(row) {
+    if (!row) return 0;
+    const cur = row.cg_memory_current_bytes || 0;
+    const inact = row.cg_inactive_file_bytes || 0;
+    return cur > inact ? cur - inact : 0;
+  }
+
+  function calcUnchargedRSSFile(row) {
+    if (!row) return 0;
+    const rf = row.proc_rss_file_bytes || 0;
+    const cf = row.cg_file_bytes || 0;
+    return rf > cf ? rf - cf : 0;
+  }
+
+  function calcEstIsolatedWS(row) {
+    if (!row) return 0;
+    return calcCgroupWS(row) + calcUnchargedRSSFile(row);
   }
 
   // Parse human byte limit client-side to power instant OOM headroom indicator.
@@ -340,7 +370,7 @@
     }
 
     const row = framePayload.row;
-    const curBytes = row.cg_memory_current_bytes || 0;
+    const curBytes = Math.max(row.cg_memory_current_bytes || 0, calcEstIsolatedWS(row));
     if (curBytes > state.peakArenaBytes) {
       state.peakArenaBytes = curBytes;
     }
@@ -754,11 +784,17 @@
     const anonB = row ? row.cg_anon_bytes || 0 : 0;
     const kernB = row ? row.cg_kernel_bytes || 0 : 0;
     const fileB = row ? row.cg_file_bytes || 0 : 0;
+    const actFileB = row ? row.cg_active_file_bytes || 0 : 0;
+    const inactFileB = row ? row.cg_inactive_file_bytes || 0 : 0;
     const curB = row ? row.cg_memory_current_bytes || 0 : 0;
+    const rssB = row ? row.proc_rss_bytes || 0 : 0;
+    const cgWsB = row ? calcCgroupWS(row) : 0;
+    const unchargedB = row ? calcUnchargedRSSFile(row) : 0;
+    const isoWsB = row ? calcEstIsolatedWS(row) : 0;
 
     // Smooth Arena scale denominator
     const mappedBytes = state.layout ? state.layout.total_binary_mapped_bytes || 0 : 0;
-    let scaleMax = Math.max(curB, anonB + kernB + fileB, state.peakArenaBytes, 64 * 1024 * 1024);
+    let scaleMax = Math.max(curB, isoWsB, anonB + kernB + fileB, state.peakArenaBytes, 64 * 1024 * 1024);
     if (!lim.unlimited && lim.bytes > 0) {
       scaleMax = Math.max(scaleMax, Math.round(lim.bytes * 1.12));
     } else if (mappedBytes > 0) {
@@ -768,13 +804,45 @@
     dom.arenaScaleLabel.textContent = `(bar full scale: ${fmtMiB(scaleMax)})`;
     dom.legArenaAnon.textContent = fmtMiB(anonB);
     dom.legArenaKernel.textContent = fmtMiB(kernB);
-    dom.legArenaFile.textContent = fmtMiB(fileB);
+    dom.legArenaActiveFile.textContent = fmtMiB(actFileB);
+    dom.legArenaInactiveFile.textContent = fmtMiB(inactFileB);
+    dom.legArenaWs.textContent =
+      unchargedB >= 1024 * 1024 ? `${fmtMiB(cgWsB)} (Iso ${fmtMiB(isoWsB)})` : fmtMiB(cgWsB);
     dom.legArenaLimit.textContent = lim.unlimited ? "max (unlimited)" : lim.human;
 
+    // Order Anon + Kernel + Active File contiguously inside Kubelet Working Set, followed by Inactive File up to memory.current.
+    const totalCharged = curB > 0 ? curB : anonB + kernB + fileB;
+    const inactDraw = Math.min(totalCharged, inactFileB);
+    const wsSpan = Math.max(0, totalCharged - inactDraw);
+    const anonDraw = Math.min(anonB, wsSpan);
+    const kernDraw = Math.min(kernB, Math.max(0, wsSpan - anonDraw));
+    const actFileDraw = Math.max(0, wsSpan - anonDraw - kernDraw);
+
     const pct = (b) => Math.max(0, Math.min(100, (b / scaleMax) * 100));
-    dom.segAnon.style.width = pct(anonB).toFixed(2) + "%";
-    dom.segKernel.style.width = pct(kernB).toFixed(2) + "%";
-    dom.segFile.style.width = pct(fileB).toFixed(2) + "%";
+    dom.segAnon.style.width = pct(anonDraw).toFixed(2) + "%";
+    dom.segKernel.style.width = pct(kernDraw).toFixed(2) + "%";
+    dom.segActiveFile.style.width = pct(actFileDraw).toFixed(2) + "%";
+    dom.segInactiveFile.style.width = pct(inactDraw).toFixed(2) + "%";
+
+    if (row && totalCharged > 0) {
+      const wp = Math.max(0.5, Math.min(99.5, (wsSpan / scaleMax) * 100));
+      dom.wsLine.style.display = "block";
+      dom.wsLine.style.left = wp.toFixed(2) + "%";
+      dom.wsTag.textContent = `Kubelet WS ${fmtMiB(cgWsB)}`;
+      dom.wsTag.style.transform = wp < 18 ? "translateX(6px)" : "translateX(-104%)";
+    } else {
+      dom.wsLine.style.display = "none";
+    }
+
+    if (row && unchargedB >= 1024 * 1024) {
+      const ip = Math.max(0.5, Math.min(99.5, (isoWsB / scaleMax) * 100));
+      dom.isoWsLine.style.display = "block";
+      dom.isoWsLine.style.left = ip.toFixed(2) + "%";
+      dom.isoWsTag.textContent = `Est. Iso WS ${fmtMiB(isoWsB)}`;
+      dom.isoWsTag.style.transform = ip > 82 ? "translateX(-104%)" : "translateX(6px)";
+    } else {
+      dom.isoWsLine.style.display = "none";
+    }
 
     if (!lim.unlimited && lim.bytes > 0) {
       const lp = Math.max(1, Math.min(99.5, (lim.bytes / scaleMax) * 100));
@@ -789,6 +857,8 @@
     if (!row) {
       dom.kpiCgCur.textContent = "—";
       dom.kpiCgSub.textContent = `limit: ${lim.human || "—"}`;
+      dom.kpiCgWs.textContent = "—";
+      dom.kpiCgWsSub.textContent = "VmRSS: — · Inact: —";
       dom.kpiBinRes.textContent = "—";
       dom.kpiBinSub.textContent = state.totalPages ? `${fmtInt(state.totalPages)} pages mapped` : "—";
       dom.kpiCleanEvict.textContent = "—";
@@ -823,6 +893,14 @@
 
     dom.kpiCgCur.textContent = fmtMiB(curB);
     dom.kpiCgSub.textContent = `Anon+Kern ${fmtMiB(anonB + kernB)} · limit ${lim.unlimited ? "max" : lim.human}`;
+
+    dom.kpiCgWs.textContent = `${fmtMiB(cgWsB)} | Iso ${fmtMiB(isoWsB)}`;
+    const wsRssDiff = cgWsB - rssB;
+    const wsDiffStr = (wsRssDiff >= 0 ? "+" : "−") + fmtMiB(Math.abs(wsRssDiff));
+    dom.kpiCgWsSub.textContent =
+      unchargedB >= 1024 * 1024
+        ? `VmRSS ${fmtMiB(rssB)} (+${fmtMiB(unchargedB)} uncharged RssFile)`
+        : `VmRSS ${fmtMiB(rssB)} (Δ ${wsDiffStr}) · Inact −${fmtMiB(inactFileB)}`;
 
     dom.kpiBinRes.textContent = fmtMiB(binResPages * pageSize);
     dom.kpiBinSub.textContent = `${((binResPages / binTotal) * 100).toFixed(1)}% of ELF · CoW ${fmtMiB((row.bin_present_cow_pages || 0) * pageSize)}`;
@@ -904,8 +982,14 @@
 
     const s = state.finalMeta.summary;
     const savedMsg = state.resultsSubdir ? ` · Saved to ${state.resultsSubdir}` : " · (In-memory run)";
+    let wsSummaryMsg = "";
+    if (s.peak_cg_working_set_bytes > 0 || s.final_cg_working_set_bytes > 0) {
+      wsSummaryMsg =
+        ` · Kubelet WS ${fmtMiB(s.peak_cg_working_set_bytes)} → ${fmtMiB(s.final_cg_working_set_bytes)}` +
+        ` (Est. Iso ${fmtMiB(s.peak_est_isolated_ws_bytes)} → ${fmtMiB(s.final_est_isolated_ws_bytes)})`;
+    }
     dom.diagHint.textContent = `Verdict: ${s.verdict}`;
-    dom.diagVerdict.textContent = `[${s.verdict.toUpperCase()}] ${s.verdict_reason}${savedMsg}`;
+    dom.diagVerdict.textContent = `[${s.verdict.toUpperCase()}] ${s.verdict_reason}${wsSummaryMsg}${savedMsg}`;
 
     if (state.sections && state.sections.length > 0) {
       const pageSize = state.finalMeta.page_size_bytes || 4096;
@@ -1326,7 +1410,7 @@
     const c = dom.sparkCanvas;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const cssW = Math.max(200, Math.floor(c.clientWidth || 600));
-    const cssH = 44;
+    const cssH = 58;
     const devW = Math.round(cssW * dpr);
     const devH = Math.round(cssH * dpr);
     if (c.width !== devW || c.height !== devH) {
@@ -1339,21 +1423,32 @@
 
     const n = state.frames.length;
     if (n === 0) {
+      if (dom.sparkKeyIso) dom.sparkKeyIso.style.display = "none";
       ctx.font = `${Math.round(11 * dpr)}px "JetBrains Mono", ui-monospace, monospace`;
       ctx.fillStyle = "hsl(213, 12%, 46%)";
-      ctx.fillText("Timeline frame history will stream here during benchmark execution", Math.round(6 * dpr), Math.round(25 * dpr));
+      ctx.fillText("Timeline frame history & Kubelet Working Set trace will stream here during benchmark execution", Math.round(6 * dpr), Math.round(32 * dpr));
       return;
     }
 
     let maxDelta = 8;
+    let maxMem = 16 * 1024 * 1024;
+    let anyIsoDivergence = false;
     for (let i = 0; i < n; i++) {
       const r = state.frames[i].row;
       const tot = (r.delta_cold_faults || 0) + (r.delta_evictions || 0) + (r.delta_refaults_total || 0);
       if (tot > maxDelta) maxDelta = tot;
+      const cur = r.cg_memory_current_bytes || 0;
+      const iso = calcEstIsolatedWS(r);
+      if (cur > maxMem) maxMem = cur;
+      if (iso > maxMem) maxMem = iso;
+      if (calcUnchargedRSSFile(r) >= 1024 * 1024) anyIsoDivergence = true;
+    }
+    if (dom.sparkKeyIso) {
+      dom.sparkKeyIso.style.display = anyIsoDivergence ? "inline-flex" : "none";
     }
 
     // Use sqrt compression so medium runtime bursts stay visible next to the massive startup cold-fault spike.
-    const scaleY = (v) => (Math.sqrt(v) / Math.sqrt(maxDelta)) * (devH - Math.round(6 * dpr));
+    const scaleY = (v) => (Math.sqrt(v) / Math.sqrt(maxDelta)) * (devH - Math.round(8 * dpr));
     const barW = Math.max(1, devW / n);
 
     for (let i = 0; i < n; i++) {
@@ -1367,21 +1462,53 @@
 
       if (cold > 0) {
         const h = Math.max(1, scaleY(cold));
-        ctx.fillStyle = "hsla(192, 92%, 68%, 0.85)";
+        ctx.fillStyle = "hsla(192, 92%, 68%, 0.45)";
         ctx.fillRect(x, yBottom - h, Math.max(1.5, barW), h);
         yBottom -= h;
       }
       if (evict > 0) {
         const h = Math.max(1, scaleY(evict));
-        ctx.fillStyle = "hsla(156, 82%, 60%, 0.85)";
+        ctx.fillStyle = "hsla(156, 82%, 60%, 0.45)";
         ctx.fillRect(x, Math.max(0, yBottom - h), Math.max(1.5, barW), h);
       }
       if (refault > 0) {
         const h = Math.max(2, scaleY(refault));
-        ctx.fillStyle = "hsla(8, 90%, 62%, 0.95)";
+        ctx.fillStyle = "hsla(8, 90%, 62%, 0.72)";
         ctx.fillRect(x, 0, Math.max(2, barW), h);
       }
     }
+
+    // Overlay memory polylines: memory.current, optional Est. Iso WS, and Kubelet Working Set.
+    const padTop = Math.round(4 * dpr);
+    const padBot = Math.round(3 * dpr);
+    const memY = (bytes) =>
+      devH - padBot - Math.max(0, Math.min(1, bytes / maxMem)) * (devH - padTop - padBot);
+    const strokeMemTrace = (valFn, strokeStyle, widthPx, dash) => {
+      ctx.save();
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = Math.max(1, widthPx);
+      if (dash) ctx.setLineDash(dash);
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const x = n === 1 ? devW / 2 : (i / (n - 1)) * devW;
+        const y = memY(valFn(state.frames[i].row));
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      if (n === 1) {
+        const y = memY(valFn(state.frames[0].row));
+        ctx.moveTo(0, y);
+        ctx.lineTo(devW, y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    strokeMemTrace((r) => r.cg_memory_current_bytes || 0, "hsla(210, 22%, 82%, 0.58)", Math.round(1.25 * dpr), null);
+    if (anyIsoDivergence) {
+      strokeMemTrace(calcEstIsolatedWS, "hsla(188, 92%, 70%, 0.88)", Math.round(1.5 * dpr), [Math.round(4 * dpr), Math.round(3 * dpr)]);
+    }
+    strokeMemTrace(calcCgroupWS, "hsl(160, 82%, 56%)", Math.round(2 * dpr), null);
 
     // Draw Markers (Ready, limit_change, reclaim)
     for (const mk of state.markers) {

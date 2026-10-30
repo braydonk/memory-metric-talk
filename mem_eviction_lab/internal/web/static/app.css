@@ -37,7 +37,10 @@
   /* Cgroup Arena Segment Colors */
   --arena-anon: hsl(38, 76%, 52%);
   --arena-kernel: hsl(210, 16%, 46%);
-  --arena-file: hsl(203, 78%, 52%);
+  --arena-active-file: hsl(201, 82%, 53%);
+  --arena-inactive-file: hsl(208, 28%, 28%);
+  --arena-ws: hsl(160, 78%, 54%);
+  --arena-iso-ws: hsl(188, 92%, 68%);
   --arena-limit: hsl(8, 82%, 60%);
 
   /* Status Colors */
@@ -500,9 +503,20 @@ html, body {
   flex-shrink: 0;
 }
 
+.swatch-hatched {
+  background: repeating-linear-gradient(
+    -45deg,
+    hsla(203, 52%, 44%, 0.72) 0px,
+    hsla(203, 52%, 44%, 0.72) 2.5px,
+    hsla(214, 26%, 16%, 0.9) 2.5px,
+    hsla(214, 26%, 16%, 0.9) 5px
+  );
+  border: 1px solid hsla(203, 50%, 58%, 0.45);
+}
+
 .arena-track-wrap {
   position: relative;
-  height: 28px;
+  height: 36px;
   background: var(--bg-sunken);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
@@ -530,8 +544,74 @@ html, body {
   background: linear-gradient(180deg, hsl(210, 17%, 52%), hsl(212, 16%, 40%));
 }
 
-.arena-seg-file {
-  background: linear-gradient(180deg, hsl(202, 82%, 56%), hsl(205, 76%, 44%));
+.arena-seg-active-file {
+  background: linear-gradient(180deg, hsl(201, 84%, 56%), hsl(204, 76%, 44%));
+}
+
+.arena-seg-inactive-file {
+  background: repeating-linear-gradient(
+    -45deg,
+    hsla(204, 48%, 38%, 0.58) 0px,
+    hsla(204, 48%, 38%, 0.58) 5px,
+    hsla(214, 26%, 14%, 0.72) 5px,
+    hsla(214, 26%, 14%, 0.72) 10px
+  );
+  box-shadow: inset 0 0 0 1px hsla(203, 55%, 58%, 0.28);
+}
+
+.arena-ws-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--arena-ws);
+  box-shadow: 0 0 8px hsla(160, 82%, 52%, 0.65);
+  transition: left 95ms linear;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.arena-ws-tag {
+  position: absolute;
+  bottom: 2px;
+  transform: translateX(-104%);
+  background: hsla(215, 25%, 6%, 0.9);
+  color: hsl(160, 84%, 72%);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid hsla(160, 72%, 50%, 0.45);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.arena-iso-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 2px dashed var(--arena-iso-ws);
+  transition: left 95ms linear;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.arena-iso-tag {
+  position: absolute;
+  bottom: 2px;
+  transform: translateX(6px);
+  background: hsla(215, 25%, 6%, 0.9);
+  color: hsl(188, 92%, 76%);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px dashed hsla(188, 86%, 62%, 0.5);
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .arena-limit-marker {
@@ -543,16 +623,17 @@ html, body {
   box-shadow: 0 0 8px hsla(8, 88%, 58%, 0.7);
   transition: left 120ms ease-out;
   pointer-events: none;
+  z-index: 3;
 }
 
 .arena-limit-tag {
   position: absolute;
-  top: 3px;
+  top: 2px;
   transform: translateX(-104%);
-  background: hsla(215, 25%, 6%, 0.88);
+  background: hsla(215, 25%, 6%, 0.9);
   color: hsl(8, 92%, 74%);
   font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   font-weight: 600;
   padding: 1px 5px;
   border-radius: 3px;
@@ -564,8 +645,20 @@ html, body {
 /* KPI Strip */
 .kpi-strip {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 8px;
+}
+
+.kpi-cell-ws {
+  border-color: hsla(160, 62%, 48%, 0.28);
+}
+
+.kpi-value-split {
+  font-size: 0.86rem;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .kpi-cell {
@@ -718,10 +811,49 @@ html, body {
   padding: 6px 8px 4px;
 }
 
+.timeline-right-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.spark-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.spark-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.spark-line-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 0;
+}
+
+.spark-sw-ws {
+  border-top: 2px solid var(--arena-ws);
+}
+
+.spark-sw-cur {
+  border-top: 2px solid hsla(210, 22%, 78%, 0.65);
+}
+
+.spark-sw-iso {
+  border-top: 2px dashed var(--arena-iso-ws);
+}
+
 #timeline-spark-canvas {
   display: block;
   width: 100%;
-  height: 44px;
+  height: 58px;
 }
 
 #timeline-slider {
@@ -865,13 +997,13 @@ html, body {
 }
 
 /* Responsive Breakpoints */
-@media (max-width: 1180px) {
+@media (max-width: 1320px) {
   .kpi-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   .app-shell {
     padding: 10px;
   }

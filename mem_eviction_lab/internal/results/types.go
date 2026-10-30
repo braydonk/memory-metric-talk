@@ -98,6 +98,36 @@ type SampleRow struct {
 	ProcRSSShmemBytes uint64 `json:"proc_rss_shmem_bytes"`
 	ProcHWMBytes      uint64 `json:"proc_hwm_bytes"`
 	ProcSwapBytes     uint64 `json:"proc_swap_bytes"`
+
+	// Simulated Kubelet cgroup v2 working_set_bytes telemetry.
+	CGWorkingSetBytes          uint64 `json:"cg_working_set_bytes"`
+	EstIsolatedWorkingSetBytes uint64 `json:"est_isolated_working_set_bytes"`
+}
+
+// KubeletWorkingSetBytes computes Kubernetes container working_set_bytes on Linux cgroup v2
+// (matching cAdvisor setMemoryStats and runc/libcontainer/cgroups/fs2):
+//
+//	max(0, memory.current - memory.stat[inactive_file])
+func KubeletWorkingSetBytes(currentBytes, inactiveFileBytes uint64) uint64 {
+	if currentBytes <= inactiveFileBytes {
+		return 0
+	}
+	return currentBytes - inactiveFileBytes
+}
+
+// UnchargedRSSFileBytes returns mapped file-backed RSS from /proc/[pid]/status that exceeds
+// the leaf cgroup's memory.stat[file] charge due to foreign/shared first-touch page cache ownership.
+func UnchargedRSSFileBytes(procRSSFileBytes, cgFileBytes uint64) uint64 {
+	if procRSSFileBytes <= cgFileBytes {
+		return 0
+	}
+	return procRSSFileBytes - cgFileBytes
+}
+
+// PopulateWorkingSet populates CGWorkingSetBytes and EstIsolatedWorkingSetBytes from raw cgroup and proc fields.
+func (r *SampleRow) PopulateWorkingSet() {
+	r.CGWorkingSetBytes = KubeletWorkingSetBytes(r.CGMemoryCurrentBytes, r.CGInactiveFileBytes)
+	r.EstIsolatedWorkingSetBytes = r.CGWorkingSetBytes + UnchargedRSSFileBytes(r.ProcRSSFileBytes, r.CGFileBytes)
 }
 
 // SectionRow represents one row in sections.csv summarizing end-of-run outcomes per mapped ELF section.
@@ -160,9 +190,17 @@ type FinalSummary struct {
 	CleanlyEvictedBinBytes       uint64  `json:"cleanly_evicted_bin_bytes"`
 	CleanReclaimPercentOfFaulted float64 `json:"clean_reclaim_percent_of_faulted"`
 	PeakCGMemoryBytes            uint64  `json:"peak_cg_memory_bytes"`
+	FinalCGMemoryBytes           uint64  `json:"final_cg_memory_bytes"`
 	PeakCGAnonBytes              uint64  `json:"peak_cg_anon_bytes"`
 	PeakCGFileBytes              uint64  `json:"peak_cg_file_bytes"`
+	FinalCGActiveFileBytes       uint64  `json:"final_cg_active_file_bytes"`
+	FinalCGInactiveFileBytes     uint64  `json:"final_cg_inactive_file_bytes"`
+	PeakCGWorkingSetBytes        uint64  `json:"peak_cg_working_set_bytes"`
+	FinalCGWorkingSetBytes       uint64  `json:"final_cg_working_set_bytes"`
+	PeakEstIsolatedWSBytes       uint64  `json:"peak_est_isolated_ws_bytes"`
+	FinalEstIsolatedWSBytes      uint64  `json:"final_est_isolated_ws_bytes"`
 	PeakProcRSSBytes             uint64  `json:"peak_proc_rss_bytes"`
+	FinalProcRSSBytes            uint64  `json:"final_proc_rss_bytes"`
 	TotalColdFaults              uint64  `json:"total_cold_faults"`
 	TotalEvictions               uint64  `json:"total_evictions"`
 	TotalRefaults01              uint64  `json:"total_refaults_01"`

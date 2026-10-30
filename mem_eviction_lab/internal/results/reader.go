@@ -89,6 +89,11 @@ func (r *csvRowReader) u64(col string) uint64 {
 	return v
 }
 
+func (r *csvRowReader) has(col string) bool {
+	i, ok := r.idx[col]
+	return ok && i < len(r.rec)
+}
+
 func (r *csvRowReader) i64(col string) int64 {
 	s := r.str(col)
 	if r.err != nil {
@@ -199,6 +204,18 @@ func readSamplesCSV(path string) ([]SampleRow, error) {
 			ProcRSSShmemBytes:        rr.u64("proc_rss_shmem_bytes"),
 			ProcHWMBytes:             rr.u64("proc_hwm_bytes"),
 			ProcSwapBytes:            rr.u64("proc_swap_bytes"),
+		}
+		hasWS := rr.has("cg_working_set_bytes")
+		hasIsoWS := rr.has("est_isolated_working_set_bytes")
+		if hasWS {
+			row.CGWorkingSetBytes = rr.u64("cg_working_set_bytes")
+		} else {
+			row.CGWorkingSetBytes = KubeletWorkingSetBytes(row.CGMemoryCurrentBytes, row.CGInactiveFileBytes)
+		}
+		if hasIsoWS {
+			row.EstIsolatedWorkingSetBytes = rr.u64("est_isolated_working_set_bytes")
+		} else {
+			row.EstIsolatedWorkingSetBytes = row.CGWorkingSetBytes + UnchargedRSSFileBytes(row.ProcRSSFileBytes, row.CGFileBytes)
 		}
 		if rr.err != nil {
 			return nil, fmt.Errorf("parse %s line %d: %w", SamplesCSVName, lineNum, rr.err)

@@ -151,20 +151,23 @@ func TestGenerateSingleAndMultiRun(t *testing.T) {
 		"3. Binary Refault",
 		"4. Page Thrashing / OOM Kill",
 		"Run Setup &amp; Verdict (Columns 1&ndash;3)",
-		"Collector Binary Tracking &mdash; Userspace pagemap (Columns 4&ndash;7)",
-		"Kernel Reclaim &amp; Pressure &mdash; Cgroup v2 (Columns 8&ndash;10)",
-		"Telemetry Sampling (Column 11)",
+		"Kubernetes Pod Eviction Accounting &mdash; Cgroup v2 + procfs (Column 4)",
+		"Collector Binary Tracking &mdash; Userspace pagemap (Columns 5&ndash;8)",
+		"Kernel Reclaim &amp; Pressure &mdash; Cgroup v2 (Columns 9&ndash;11)",
+		"Telemetry Sampling (Column 12)",
 		"#1</span><strong>Run</strong>",
 		"#2</span><strong>Memory Limit</strong>",
 		"#3</span><strong>Outcome</strong>",
-		"#4</span><strong>Peak &rarr; Final Binary</strong>",
-		"#5</span><strong>Cleanly Evicted</strong>",
-		"#6</span><strong>Reclaimed Refault %</strong>",
-		"#7</span><strong>Binary Refaults (0&rarr;1 / PFN)</strong>",
-		"#8</span><strong>Kernel Refaults</strong>",
-		"#9</span><strong>Major Faults</strong>",
-		"#10</span><strong>PSI Full Stall</strong>",
-		"#11</span><strong>Samples (Reclaim)</strong>",
+		"#4</span><strong>Kubelet Working Set</strong>",
+		"#5</span><strong>Peak &rarr; Final Binary</strong>",
+		"#6</span><strong>Cleanly Evicted</strong>",
+		"#7</span><strong>Reclaimed Refault %</strong>",
+		"#8</span><strong>Binary Refaults (0&rarr;1 / PFN)</strong>",
+		"#9</span><strong>Kernel Refaults</strong>",
+		"#10</span><strong>Major Faults</strong>",
+		"#11</span><strong>PSI Full Stall</strong>",
+		"#12</span><strong>Samples (Reclaim)</strong>",
+		"container_memory_working_set_bytes",
 		"badge-oom_killed",
 		"badge-process_error",
 		"badge-no_reclaim",
@@ -180,14 +183,17 @@ func TestGenerateSingleAndMultiRun(t *testing.T) {
 		}
 	}
 
-	// All 11 comparison table column headers should expose viewport-safe hover/focus tooltips.
+	// All 12 comparison table column headers should expose viewport-safe hover/focus tooltips.
 	idxTheadEnd := strings.Index(multiHTML[idxTable:], "</thead>")
 	if idxTheadEnd < 0 {
 		t.Fatal("missing </thead> in #comparison-table")
 	}
 	theadSlice := multiHTML[idxTable : idxTable+idxTheadEnd]
-	if got := strings.Count(theadSlice, `<th tabindex="0" data-tip="`); got != 11 {
-		t.Fatalf("got %d tooltip-annotated <th> headers in #comparison-table; want 11", got)
+	if got := strings.Count(theadSlice, `<th tabindex="0" data-tip="`); got != 12 {
+		t.Fatalf("got %d tooltip-annotated <th> headers in #comparison-table; want 12", got)
+	}
+	if !strings.Contains(multiHTML, `<div id="chart-multi-ws" class="chart-box"></div>`) {
+		t.Fatal("missing #chart-multi-ws multi-run Working Set chart")
 	}
 	if !strings.Contains(multiHTML, `<div id="th-tooltip" role="tooltip"></div>`) {
 		t.Fatal("missing floating #th-tooltip container")
@@ -276,5 +282,65 @@ func TestBuildSummaryReclaimAndStartupMetrics(t *testing.T) {
 	st := buildSummary(1, &rdTimeout)
 	if st.StartupCompleted || !st.StartupTimedOut {
 		t.Fatalf("timeout run: StartupCompleted=%v StartupTimedOut=%v; want false/true", st.StartupCompleted, st.StartupTimedOut)
+	}
+}
+
+func TestBuildSummaryWorkingSetLegacyFallbackAndForeignCache(t *testing.T) {
+	const mibB = 1024 * 1024
+	// Legacy RunMeta whose Working Set summary fields are all 0 must derive peak & final from Samples.
+	rd := &results.RunData{
+		Dir: "/tmp/legacy-foreign",
+		Meta: results.RunMeta{
+			Name:          "otlp-minimal",
+			PageSizeBytes: 4096,
+			Summary: results.FinalSummary{
+				Verdict: results.VerdictCleanReclaim,
+			},
+		},
+		Samples: []results.SampleRow{
+			{
+				ElapsedMs:            500,
+				BinTotalPages:        1000,
+				CGMemoryCurrentBytes: 60 * mibB,
+				CGAnonBytes:          58 * mibB,
+				CGKernelBytes:        2 * mibB,
+				CGFileBytes:          0,
+				CGActiveFileBytes:    0,
+				CGInactiveFileBytes:  0,
+				ProcRSSBytes:         260 * mibB,
+				ProcRSSAnonBytes:     58 * mibB,
+				ProcRSSFileBytes:     202 * mibB,
+			},
+			{
+				ElapsedMs:            2000,
+				BinTotalPages:        1000,
+				CGMemoryCurrentBytes: 120 * mibB,
+				CGAnonBytes:          80 * mibB,
+				CGKernelBytes:        2 * mibB,
+				CGFileBytes:          38 * mibB,
+				CGActiveFileBytes:    14 * mibB,
+				CGInactiveFileBytes:  24 * mibB,
+				ProcRSSBytes:         110 * mibB,
+				ProcRSSAnonBytes:     80 * mibB,
+				ProcRSSFileBytes:     30 * mibB,
+			},
+		},
+	}
+
+	s := buildSummary(0, rd)
+	// Row 0: CG WS = 60 MiB, uncharged RssFile = 202 MiB -> Est Iso WS = 262 MiB.
+	// Row 1: CG WS = 120 - 24 = 96 MiB, uncharged = 0 -> Est Iso WS = 96 MiB.
+	if s.PeakCGWorkingSetMiB != 96.0 || s.FinalCGWorkingSetMiB != 96.0 {
+		t.Fatalf("CG WS peak/final = (%.2f, %.2f); want (96.00, 96.00)", s.PeakCGWorkingSetMiB, s.FinalCGWorkingSetMiB)
+	}
+	if s.PeakEstIsolatedWSMiB != 262.0 || s.FinalEstIsolatedWSMiB != 96.0 {
+		t.Fatalf("Iso WS peak/final = (%.2f, %.2f); want (262.00, 96.00)", s.PeakEstIsolatedWSMiB, s.FinalEstIsolatedWSMiB)
+	}
+	if s.MaxUnchargedRSSFileMiB != 202.0 {
+		t.Fatalf("MaxUnchargedRSSFileMiB = %.2f; want 202.00", s.MaxUnchargedRSSFileMiB)
+	}
+	if s.FinalCGActiveFileMiB != 14.0 || s.FinalCGInactiveFileMiB != 24.0 || s.FinalProcRSSMiB != 110.0 {
+		t.Fatalf("Final active/inactive/rss = (%.2f, %.2f, %.2f); want (14, 24, 110)",
+			s.FinalCGActiveFileMiB, s.FinalCGInactiveFileMiB, s.FinalProcRSSMiB)
 	}
 }

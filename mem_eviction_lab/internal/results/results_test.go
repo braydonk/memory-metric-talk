@@ -1,7 +1,10 @@
 package results
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,10 +32,13 @@ func TestResultsRoundTrip(t *testing.T) {
 		CGMemoryCurrentBytes:     12 * 1024 * 1024,
 		CGAnonBytes:              4 * 1024 * 1024,
 		CGFileBytes:              8 * 1024 * 1024,
+		CGActiveFileBytes:        6 * 1024 * 1024,
+		CGInactiveFileBytes:      2 * 1024 * 1024,
 		ProcRSSBytes:             12 * 1024 * 1024,
 		ProcRSSAnonBytes:         4 * 1024 * 1024,
 		ProcRSSFileBytes:         8 * 1024 * 1024,
 	}
+	s1.PopulateWorkingSet()
 	s2 := SampleRow{
 		TimestampUnixMs:          1700000000500,
 		ElapsedMs:                500,
@@ -61,6 +67,7 @@ func TestResultsRoundTrip(t *testing.T) {
 		CGWorkingsetRefaultFile:  9,
 		CGPSISomeTotalUs:         1250,
 	}
+	s2.PopulateWorkingSet()
 
 	if err := w.WriteSample(s1); err != nil {
 		t.Fatalf("WriteSample(s1): %v", err)
@@ -155,5 +162,106 @@ func TestResultsRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Blocks, blocks) {
 		t.Fatalf("Blocks mismatch:\ngot:  %+v\nwant: %+v", got.Blocks, blocks)
+	}
+}
+
+func TestWorkingSetHelpersAndLegacyCSVBackfill(t *testing.T) {
+	// 1. Underflow guard when inactive_file transiently exceeds memory.current on a non-atomic read.
+	if got := KubeletWorkingSetBytes(10*1024*1024, 11*1024*1024); got != 0 {
+		t.Fatalf("KubeletWorkingSetBytes underflow = %d; want 0", got)
+	}
+
+	// 2. Normal cold-cache isolated run (cg_file >= proc_rss_file because of readahead/config cache).
+	cold := SampleRow{
+		CGMemoryCurrentBytes: 120 * 1024 * 1024,
+		CGAnonBytes:          80 * 1024 * 1024,
+		CGKernelBytes:        2 * 1024 * 1024,
+		CGFileBytes:          38 * 1024 * 1024,
+		CGActiveFileBytes:    15 * 1024 * 1024,
+		CGInactiveFileBytes:  23 * 1024 * 1024,
+		ProcRSSBytes:         110 * 1024 * 1024,
+		ProcRSSAnonBytes:     80 * 1024 * 1024,
+		ProcRSSFileBytes:     30 * 1024 * 1024,
+	}
+	cold.PopulateWorkingSet()
+	if want := uint64(97 * 1024 * 1024); cold.CGWorkingSetBytes != want || cold.EstIsolatedWorkingSetBytes != want {
+		t.Fatalf("cold sample WS=(%d, %d); want both %d", cold.CGWorkingSetBytes, cold.EstIsolatedWorkingSetBytes, want)
+	}
+
+	// 3. Shared/foreign page-cache run (like otlp-max where execve scanner warmed RssFile outside the cgroup).
+	foreign := SampleRow{
+		CGMemoryCurrentBytes: 62 * 1024 * 1024,
+		CGAnonBytes:          56 * 1024 * 1024,
+		CGKernelBytes:        3 * 1024 * 1024,
+		CGFileBytes:          12288,
+		CGActiveFileBytes:    4096,
+		CGInactiveFileBytes:  8192,
+		ProcRSSBytes:         256 * 1024 * 1024,
+		ProcRSSAnonBytes:     56 * 1024 * 1024,
+		ProcRSSFileBytes:     200 * 1024 * 1024,
+	}
+	foreign.PopulateWorkingSet()
+	wantCGWS := uint64(62*1024*1024 - 8192)
+	wantIsoWS := wantCGWS + (200*1024*1024 - 12288)
+	if foreign.CGWorkingSetBytes != wantCGWS || foreign.EstIsolatedWorkingSetBytes != wantIsoWS {
+		t.Fatalf("foreign sample WS=(%d, %d); want (%d, %d)",
+			foreign.CGWorkingSetBytes, foreign.EstIsolatedWorkingSetBytes, wantCGWS, wantIsoWS)
+	}
+
+	// 4. Legacy 57-column samples.csv (written before working_set columns existed) backfills on LoadRunData.
+	dir := t.TempDir()
+	w, err := NewWriter(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteSample(cold); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteSample(foreign); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteMeta(RunMeta{Name: "legacy-csv", SampleCount: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	csvPath := filepath.Join(dir, SamplesCSVName)
+	rawCSV, err := os.ReadFile(csvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(rawCSV)), "\n")
+	for i, line := range lines {
+		cols := strings.Split(line, ",")
+		if len(cols) != len(samplesCSVHeader) {
+			t.Fatalf("line %d has %d cols; want %d", i, len(cols), len(samplesCSVHeader))
+		}
+		// Strip the trailing 2 working-set columns to mimic older run_results/ CSVs.
+		lines[i] = strings.Join(cols[:len(cols)-2], ",")
+	}
+	if err := os.WriteFile(csvPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadRunData(dir)
+	if err != nil {
+		t.Fatalf("LoadRunData on legacy CSV: %v", err)
+	}
+	if len(loaded.Samples) != 2 {
+		t.Fatalf("got %d samples; want 2", len(loaded.Samples))
+	}
+	if loaded.Samples[0].CGWorkingSetBytes != cold.CGWorkingSetBytes ||
+		loaded.Samples[0].EstIsolatedWorkingSetBytes != cold.EstIsolatedWorkingSetBytes {
+		t.Fatalf("row 0 backfill got (%d, %d); want (%d, %d)",
+			loaded.Samples[0].CGWorkingSetBytes, loaded.Samples[0].EstIsolatedWorkingSetBytes,
+			cold.CGWorkingSetBytes, cold.EstIsolatedWorkingSetBytes)
+	}
+	if loaded.Samples[1].CGWorkingSetBytes != foreign.CGWorkingSetBytes ||
+		loaded.Samples[1].EstIsolatedWorkingSetBytes != foreign.EstIsolatedWorkingSetBytes {
+		t.Fatalf("row 1 backfill got (%d, %d); want (%d, %d)",
+			loaded.Samples[1].CGWorkingSetBytes, loaded.Samples[1].EstIsolatedWorkingSetBytes,
+			foreign.CGWorkingSetBytes, foreign.EstIsolatedWorkingSetBytes)
 	}
 }
