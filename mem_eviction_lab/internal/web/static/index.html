@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memory Eviction Lab — Live Binary Page Observatory</title>
+  <meta name="description" content="Real-time Linux cgroup v2 page cache eviction, cold fault, Copy-on-Write, and refault visualization across OpenTelemetry Collector ELF sections.">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar" id="top-control-bar">
+      <div class="brand-group">
+        <div class="title-row">
+          <h1 class="app-title">Memory Eviction Lab</h1>
+          <span class="status-badge" id="run-status-badge" data-tone="idle">
+            <span class="status-dot"></span>
+            <span id="run-status-text">IDLE</span>
+          </span>
+        </div>
+        <div class="meta-strip" id="config-meta-strip">
+          <span class="meta-item">Config: <strong class="mono" id="meta-cfg-name">—</strong></span>
+          <span class="meta-sep">·</span>
+          <span class="meta-item">Binary: <strong class="mono" id="meta-bin-name">—</strong></span>
+          <span class="meta-sep">·</span>
+          <span class="meta-item">Persistence: <span class="mono" id="meta-save-mode">—</span></span>
+        </div>
+      </div>
+
+      <form class="launcher-controls" id="run-launch-form">
+        <div class="field-group">
+          <label class="field-label" for="input-memory-limit">Initial memory.max</label>
+          <div class="input-with-chips">
+            <input id="input-memory-limit" class="text-input input-sm" type="text" value="80MiB" spellcheck="false" autocomplete="off">
+            <div class="chip-row" id="preset-limit-chips" role="group" aria-label="Memory limit presets">
+              <button type="button" class="chip-btn" id="chip-limit-max" data-limit="max">max</button>
+              <button type="button" class="chip-btn" id="chip-limit-160" data-limit="160MiB">160M</button>
+              <button type="button" class="chip-btn" id="chip-limit-120" data-limit="120MiB">120M</button>
+              <button type="button" class="chip-btn" id="chip-limit-80" data-limit="80MiB">80M</button>
+              <button type="button" class="chip-btn" id="chip-limit-55" data-limit="55MiB">55M</button>
+              <button type="button" class="chip-btn" id="chip-limit-40" data-limit="40MiB">40M</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="input-duration">Duration</label>
+          <div class="input-with-chips">
+            <input id="input-duration" class="text-input input-xs" type="text" value="60s" spellcheck="false" autocomplete="off">
+            <div class="chip-row" id="preset-duration-chips" role="group" aria-label="Duration presets">
+              <button type="button" class="chip-btn" id="chip-dur-30s" data-dur="30s">30s</button>
+              <button type="button" class="chip-btn" id="chip-dur-60s" data-dur="60s">60s</button>
+              <button type="button" class="chip-btn" id="chip-dur-300s" data-dur="300s">300s</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="input-swap-max">swap.max</label>
+          <input id="input-swap-max" class="text-input input-xs" type="text" value="0" spellcheck="false" autocomplete="off">
+        </div>
+
+        <button type="submit" class="btn btn-primary" id="btn-start-run">Start Benchmark</button>
+        <button type="button" class="btn btn-danger" id="btn-stop-run" disabled>Stop</button>
+      </form>
+    </header>
+
+    <section class="panel live-controls-panel" id="live-controls-panel" data-disabled="true" aria-label="Live Mid-Run Kernel Pressure Controls">
+      <div class="live-group">
+        <span class="section-tag">Live memory.max</span>
+        <input id="input-live-limit" class="text-input input-sm" type="text" placeholder="e.g. 64MiB" disabled spellcheck="false">
+        <button type="button" class="btn" id="btn-apply-live-limit" disabled>Apply</button>
+        <div class="chip-row" role="group" aria-label="Live limit delta steps">
+          <button type="button" class="chip-btn live-step-btn" id="btn-step-down-16" data-delta-mib="-16" disabled>−16M</button>
+          <button type="button" class="chip-btn live-step-btn" id="btn-step-down-8" data-delta-mib="-8" disabled>−8M</button>
+          <button type="button" class="chip-btn live-step-btn" id="btn-step-up-16" data-delta-mib="16" disabled>+16M</button>
+          <button type="button" class="chip-btn live-step-btn" id="btn-step-max" data-set-limit="max" disabled>max</button>
+        </div>
+        <span class="oom-indicator" id="oom-risk-indicator" data-risk="idle">Start a run to adjust cgroup memory live</span>
+      </div>
+
+      <div class="live-group">
+        <span class="section-tag">memory.reclaim</span>
+        <button type="button" class="btn btn-teal reclaim-btn" id="btn-reclaim-16" data-reclaim="16MiB" disabled>Reclaim 16 MiB</button>
+        <button type="button" class="btn btn-teal reclaim-btn" id="btn-reclaim-64" data-reclaim="64MiB" disabled>Reclaim 64 MiB</button>
+        <button type="button" class="btn btn-teal reclaim-btn" id="btn-reclaim-all" data-reclaim="all_file" disabled>Reclaim All File Cache</button>
+        <span class="toast-msg" id="live-action-toast" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <main id="observatory-main" style="display:flex; flex-direction:column; gap:12px;">
+      <section class="panel" id="arena-panel" aria-label="Cgroup Memory Arena">
+        <div class="arena-header">
+          <h2 class="panel-heading">Cgroup v2 Memory Arena <span class="mono" id="arena-scale-label" style="color:var(--text-muted); font-weight:500; font-size:0.76rem;"></span></h2>
+          <div class="arena-legend">
+            <span class="legend-item"><span class="swatch" style="background:var(--arena-anon)"></span>Anon (Heap/Stack) <strong class="mono" id="leg-arena-anon">0.0 MiB</strong></span>
+            <span class="legend-item"><span class="swatch" style="background:var(--arena-kernel)"></span>Kernel (Slab/PT) <strong class="mono" id="leg-arena-kernel">0.0 MiB</strong></span>
+            <span class="legend-item"><span class="swatch" style="background:var(--arena-file)"></span>File Cache (Binary) <strong class="mono" id="leg-arena-file">0.0 MiB</strong></span>
+            <span class="legend-item"><span class="swatch" style="background:var(--arena-limit)"></span>memory.max <strong class="mono" id="leg-arena-limit">—</strong></span>
+          </div>
+        </div>
+
+        <div class="arena-track-wrap" id="arena-track">
+          <div class="arena-stack">
+            <div class="arena-seg arena-seg-anon" id="arena-seg-anon"></div>
+            <div class="arena-seg arena-seg-kernel" id="arena-seg-kernel"></div>
+            <div class="arena-seg arena-seg-file" id="arena-seg-file"></div>
+          </div>
+          <div class="arena-limit-marker" id="arena-limit-line" style="display:none;">
+            <span class="arena-limit-tag" id="arena-limit-tag">limit</span>
+          </div>
+        </div>
+
+        <div class="kpi-strip">
+          <div class="kpi-cell">
+            <span class="kpi-label">Cgroup Memory</span>
+            <span class="kpi-value" id="kpi-cg-cur">—</span>
+            <span class="kpi-sub" id="kpi-cg-sub">limit: —</span>
+          </div>
+          <div class="kpi-cell">
+            <span class="kpi-label">Binary Resident</span>
+            <span class="kpi-value" id="kpi-bin-res">—</span>
+            <span class="kpi-sub" id="kpi-bin-sub">0.0% of mapped ELF</span>
+          </div>
+          <div class="kpi-cell">
+            <span class="kpi-label">One-Shot Clean Evicted</span>
+            <span class="kpi-value" id="kpi-clean-evict">—</span>
+            <span class="kpi-sub" id="kpi-clean-sub">stayed evicted (0 refaults)</span>
+          </div>
+          <div class="kpi-cell">
+            <span class="kpi-label">Reclaimed Refault %</span>
+            <span class="kpi-value" id="kpi-refault-pct">—</span>
+            <span class="kpi-sub" id="kpi-refault-sub">0 refaulted / 0 evicted</span>
+          </div>
+          <div class="kpi-cell">
+            <span class="kpi-label">Tick Deltas (Fault / Evict)</span>
+            <span class="kpi-value" id="kpi-tick-deltas">—</span>
+            <span class="kpi-sub" id="kpi-cum-sub">cum: +0 cold, −0 evict, !0 refault</span>
+          </div>
+          <div class="kpi-cell">
+            <span class="kpi-label">PSI Memory Stall</span>
+            <span class="kpi-value" id="kpi-psi">—</span>
+            <span class="kpi-sub" id="kpi-events-sub">memory.events max: 0</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="page-viz-panel" aria-label="Binary Page Map Visualization">
+        <div class="viz-toolbar">
+          <div class="viz-title-wrap">
+            <h2 class="panel-heading">Collector ELF Virtual Page Map</h2>
+            <span class="mono" id="viz-summary-caption" style="font-size:0.76rem; color:var(--text-secondary);">Waiting for binary layout…</span>
+          </div>
+          <div class="chip-row" role="group" aria-label="Grid resolution mode">
+            <button type="button" class="chip-btn active" id="btn-mode-pages" data-mode="pages">4 KiB Pages (1:1)</button>
+            <button type="button" class="chip-btn" id="btn-mode-blocks" data-mode="blocks">256 KiB Blocks</button>
+          </div>
+        </div>
+
+        <div class="legend-grid" id="page-state-legend">
+          <span class="legend-item"><span class="swatch" style="background:var(--col-never-faulted); border:1px solid var(--border-default)"></span>Never Faulted <span class="legend-count" id="cnt-never">0</span></span>
+          <span class="legend-item"><span class="swatch" style="background:var(--col-cold-flash)"></span>Cold Fault Flash <span class="legend-count" id="cnt-flash-cold">0</span></span>
+          <span class="legend-item"><span class="swatch" style="background:var(--col-file-res)"></span>Resident File <span class="legend-count" id="cnt-res-file">0</span></span>
+          <span class="legend-item"><span class="swatch" style="background:var(--col-cow)"></span>Resident CoW (Dirty) <span class="legend-count" id="cnt-res-cow">0</span></span>
+          <span class="legend-item"><span class="swatch" style="background:var(--col-evict-flash)"></span>Eviction Flash <span class="legend-count" id="cnt-flash-evict">0</span></span>
+          <span class="legend-item"><span class="swatch" style="background:var(--col-evict-clean)"></span>Cleanly Evicted <span class="legend-count" id="cnt-evict-clean">0</span></span>
+          <span class="legend-item"><span class="swatch" style="background:var(--col-refault-1)"></span>Refaulted (Settled) <span class="legend-count" id="cnt-refault-1">0</span></span>
+          <span class="legend-item"><span class="swatch" style="background:var(--col-thrash)"></span>Thrashing (Churning) <span class="legend-count" id="cnt-thrash">0</span></span>
+        </div>
+
+        <div class="canvas-stage" id="canvas-stage">
+          <canvas id="page-map-canvas"></canvas>
+        </div>
+      </section>
+
+      <section class="panel scrubber-panel" id="timeline-panel" aria-label="Timeline History and Slow-Motion Scrubber">
+        <div class="scrubber-top">
+          <div class="playback-controls">
+            <button type="button" class="btn btn-live-pill is-live" id="btn-follow-live">● LIVE</button>
+            <button type="button" class="btn btn-icon" id="btn-play-pause" disabled>Replay ▶</button>
+            <button type="button" class="btn btn-icon" id="btn-step-prev" title="Previous frame" disabled>◀</button>
+            <button type="button" class="btn btn-icon" id="btn-step-next" title="Next frame" disabled>▶</button>
+            <label for="select-replay-speed" class="field-label" style="margin-left:6px;">Replay Speed</label>
+            <select id="select-replay-speed" class="select-input">
+              <option value="0.1">0.1× (Startup Slow-Mo)</option>
+              <option value="0.25">0.25×</option>
+              <option value="0.5" selected>0.5×</option>
+              <option value="1">1.0×</option>
+              <option value="2">2.0×</option>
+            </select>
+          </div>
+          <div class="mono" id="timeline-frame-label" style="font-size:0.78rem; color:var(--text-secondary);">Frame 0 / 0 · t = 0.00s</div>
+        </div>
+
+        <div class="timeline-box">
+          <canvas id="timeline-spark-canvas"></canvas>
+          <input type="range" id="timeline-slider" min="0" max="0" value="0" step="1" disabled aria-label="Scrub benchmark timeline frame">
+        </div>
+      </section>
+
+      <details class="diag-details" id="run-diagnostics-drawer">
+        <summary class="diag-summary">
+          <span>Run Summary, Section Breakdown &amp; Collector Log</span>
+          <span class="mono" id="diag-summary-hint" style="font-size:0.75rem; color:var(--text-secondary);">No completed run yet</span>
+        </summary>
+        <div class="diag-body">
+          <div class="verdict-banner" id="diag-verdict-banner">Run a benchmark to inspect per-section eviction outcomes and Collector logs.</div>
+          <div class="section-table-wrap" id="diag-sections-wrap" style="display:none;">
+            <table class="section-table" id="diag-sections-table">
+              <thead>
+                <tr>
+                  <th>ELF Section</th>
+                  <th>Perms</th>
+                  <th>Mapped</th>
+                  <th>Ever Faulted</th>
+                  <th>One-Shot Clean Evicted</th>
+                  <th>Reclaimed Refault %</th>
+                  <th>Final Resident</th>
+                  <th>Total Refaults</th>
+                </tr>
+              </thead>
+              <tbody id="diag-sections-tbody"></tbody>
+            </table>
+          </div>
+          <div>
+            <div class="field-label" style="margin-bottom:5px;">Collector Process Output (Last 64 KiB)</div>
+            <pre class="log-pre" id="diag-collector-log">(no output yet)</pre>
+          </div>
+        </div>
+      </details>
+    </main>
+  </div>
+
+  <div class="hover-tooltip" id="map-hover-tooltip" role="tooltip"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

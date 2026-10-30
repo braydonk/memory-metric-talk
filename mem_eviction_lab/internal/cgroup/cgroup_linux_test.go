@@ -5,8 +5,12 @@ package cgroup
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/braydonk/memory-metric-talk/mem_eviction_lab/internal/bytefmt"
 )
 
 func TestParseStatEventsAndPressure(t *testing.T) {
@@ -90,5 +94,82 @@ func TestRemoveLeafAndParentCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(parent); !os.IsNotExist(err) {
 		t.Fatalf("parent should be deleted once last leaf is removed, stat err=%v", err)
+	}
+}
+
+func TestSetMemoryMaxAndReclaim(t *testing.T) {
+	leaf := t.TempDir()
+	curPath := filepath.Join(leaf, "memory.current")
+	maxPath := filepath.Join(leaf, "memory.max")
+	recPath := filepath.Join(leaf, "memory.reclaim")
+
+	if err := os.WriteFile(curPath, []byte("83886080\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(maxPath, []byte("max\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := &Cgroup{
+		leafPath:   leaf,
+		dirFD:      -1,
+		currentFD:  -1,
+		statFD:     -1,
+		eventsFD:   -1,
+		pressureFD: -1,
+	}
+
+	lim, err := bytefmt.ParseLimit("55MiB", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cg.SetMemoryMax(lim); err != nil {
+		t.Fatalf("SetMemoryMax: %v", err)
+	}
+	gotMax, err := os.ReadFile(maxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(gotMax)) != "57671680" {
+		t.Fatalf("memory.max = %q; want 57671680", gotMax)
+	}
+
+	// Missing memory.reclaim must return error without O_CREATE materializing the file.
+	if _, _, err := cg.Reclaim(16 * 1024 * 1024); err == nil {
+		t.Fatal("expected error when memory.reclaim is absent")
+	}
+	if _, err := os.Stat(recPath); !os.IsNotExist(err) {
+		t.Fatalf("memory.reclaim must not be created by O_WRONLY open; stat err=%v", err)
+	}
+
+	// Simulate full reclaim succeeding.
+	if err := os.WriteFile(recPath, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cg.writeFn = func(path string, data []byte) error {
+		if err := writeExistingFile(path, data); err != nil {
+			return err
+		}
+		return os.WriteFile(curPath, []byte("67108864\n"), 0o644)
+	}
+	reclaimed, partial, err := cg.Reclaim(16 * 1024 * 1024)
+	if err != nil {
+		t.Fatalf("Reclaim full: %v", err)
+	}
+	if partial || reclaimed != 16*1024*1024 {
+		t.Fatalf("Reclaim full = (%d, %v); want (16MiB, false)", reclaimed, partial)
+	}
+
+	// Simulate kernel returning EAGAIN after partial LRU reclaim down to floor.
+	cg.writeFn = func(_ string, _ []byte) error {
+		_ = os.WriteFile(curPath, []byte("50331648\n"), 0o644)
+		return syscall.EAGAIN
+	}
+	reclaimed, partial, err = cg.Reclaim(64 * 1024 * 1024)
+	if err != nil {
+		t.Fatalf("Reclaim partial (EAGAIN) returned unexpected error: %v", err)
+	}
+	if !partial || reclaimed != 16*1024*1024 {
+		t.Fatalf("Reclaim partial = (%d, %v); want (16MiB, true)", reclaimed, partial)
 	}
 }

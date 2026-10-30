@@ -1,6 +1,6 @@
 # Memory Eviction Lab (`mem_eviction_lab`)
 
-`mem_eviction_lab` is a Linux cgroup v2 experiment harness and static HTML visualizer for studying how the Linux kernel reclaims file-backed pages of an OpenTelemetry Collector ELF binary (`.text`, `.rodata`, `.gopclntab`, `.data`) under memory pressure.
+`mem_eviction_lab` is a Linux cgroup v2 experiment harness, live browser observatory, and static HTML visualizer for studying how the Linux kernel reclaims file-backed pages of an OpenTelemetry Collector ELF binary (`.text`, `.rodata`, `.gopclntab`, `.data`) under memory pressure.
 
 Large Collector distributions like `otelcol-contrib` fault tens or hundreds of MiB of binary pages into RAM during startup (`execve` + Go package `init()` across every compiled-in component). This lab isolates a Collector process inside a cold-cached leaf cgroup, sweeps `memory.max` limits, tracks per-page eviction and refault transitions via `/proc/<pid>/pagemap` alongside kernel cgroup v2 metrics (`memory.stat`, `memory.events`, PSI `memory.pressure`), and pinpoints:
 1. How much of the resident Collector binary is **one-shot startup bloat** that can be reclaimed with zero steady-state penalty (**clean reclaim**).
@@ -75,6 +75,29 @@ sudo bash -c '
 > **Note**: Using `|| echo ...` inside a scripted sweep prevents an early Collector startup timeout (e.g., severe startup page thrashing under an aggressive limit) from aborting the rest of the loop. Even on OOM kills or startup timeouts, `manager` still writes complete CSV/JSON artifacts and cleans up the cgroup before exiting, and changes result directory ownership back to `SUDO_UID:SUDO_GID`.
 
 Open `comparison_dashboard.html` directly in any browser. Multi-run sweeps automatically sort from `Unlimited (max)` down to the tightest memory limit.
+
+### 5. Launch the interactive live web interface (`-web`)
+
+Start `manager` with `-web <port>` to host a loopback-only (`127.0.0.1:<port>`) interactive observatory for live demos and interactive page-level exploration:
+
+```bash
+# Purely in-memory live session (--results-dir is optional when -web is set):
+sudo ./bin/manager \
+  --config configs/run-otlp.yaml \
+  -web 8080
+
+# Or persist every web-triggered run into timestamped subdirectories under results/web-runs:
+sudo ./bin/manager \
+  --config configs/run-otlp.yaml \
+  --results-dir results/web-runs \
+  -web 8080
+```
+
+Open `http://127.0.0.1:8080` in your browser to:
+- **Launch back-to-back runs** with editable `memory.max`, `duration`, and `swap.max` presets without restarting `manager`.
+- **Watch every 4 KiB binary page in real time** (100ms steady-state / 50ms reclaim-burst cadence) across adaptive ELF section bands (`.text`, `.rodata`, `.gopclntab`, `.noptrdata`, `.data`), flashing cyan on cold faults, gold on CoW dirtying, mint/jade on clean eviction, and tangerine/vermilion on refault thrashing—paired with a live cgroup `memory.max` arena bar (`anon` + `kernel` + `file`).
+- **Squeeze memory mid-run**: dynamically change `memory.max` (with a live OOM-risk check against `anon + kernel`) or trigger one-shot proactive kernel reclaim via `memory.reclaim` (Linux 5.19+).
+- **Scrub & replay in slow motion**: pause or scrub frame history and replay the ~3.5s Go `init()` startup fault cascade at `0.1×` speed, or toggle between **4 KiB Pages (1:1)** and **256 KiB Blocks** with hover inspection.
 
 ---
 
@@ -190,7 +213,8 @@ workload:
 | Flag | Default | Description |
 |---|---|---|
 | `--config` | *(required)* | Path to run YAML configuration file |
-| `--results-dir` | *(required)* | Output directory for run artifacts |
+| `--results-dir` | *(required unless `-web`)* | Output directory for run artifacts (optional only in `-web` mode, where each run creates a timestamped subdirectory if set) |
+| `-web` | `0` *(disabled)* | Start interactive localhost web UI on `127.0.0.1:<port>` (`1..65535`) instead of running headlessly |
 | `--duration` | `60s` | Observation window (starts *after* readiness when `workload.enabled` is true) |
 | `--memory-limit` | `""` | Overrides `memory_limit` from the YAML config (e.g. `max`, `120MiB`) |
 | `--allow-warm-cache` | `false` | Continue even if binary pages remain cached after `FADV_DONTNEED` |

@@ -442,11 +442,11 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
                 </div>
                 <div class="outcome-entry">
                   <span class="badge badge-thrashing">thrashing</span>
-                  <span>Active binary pages repeatedly refaulted or stalled execution: <code>(&ge;1 page refaulted &ge;2x AND (refaults &ge; 64 OR refaults/faulted &ge; 5%))</code> or <code>PSI full stall &ge; 100 ms</code>.</span>
+                  <span>Continuous post-startup page churn where binary pages are simultaneously evicted and refaulted across sustained steady-state windows (<code>&ge;25%</code> of 1s windows, <code>&ge;50%</code> of 5s epochs, or <code>&ge;6/10</code> trailing seconds active).</span>
                 </div>
                 <div class="outcome-entry">
                   <span class="badge badge-clean_reclaim">clean reclaim</span>
-                  <span>Kernel reclaimed unused binary pages while keeping refaults and PSI <code>full</code> stalls below the thrashing thresholds.</span>
+                  <span>Kernel reclaimed unused binary pages cleanly, or stabilized after bounded startup / manual-reclaim corrections without continuous steady-state churn.</span>
                 </div>
               </div>
             </div>
@@ -940,7 +940,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         {
           label: 'Binary Page Refaults',
           val: fmtInt(sum.total_refaults) + ' pages',
-          sub: '0->1: ' + fmtInt(sum.total_refaults_01) + ' | PFN: ' + fmtInt(sum.total_refaults_pfn) + ' | >=2x thrash: ' + fmtInt(sum.thrashing_pages)
+          sub: '0->1: ' + fmtInt(sum.total_refaults_01) + ' | PFN: ' + fmtInt(sum.total_refaults_pfn) + ' | active thrash: ' + fmtInt(sum.thrashing_pages)
         },
         {
           label: 'Kernel Reclaim & Refaults',
@@ -1214,7 +1214,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
             html += 'Section: <strong>' + b.primary_section + '</strong> (' + b.vma_perms + ')<br/>';
             html += 'Resident file: ' + b.present_final_pages + ' | CoW: ' + b.present_cow_final_pages +
               ' | Cleanly evicted: ' + b.cleanly_evicted_pages + ' | Never faulted: ' + b.never_faulted_pages + '<br/>';
-            html += 'Refaulted pages: <strong>' + b.ever_refaulted_pages + '</strong> (>=2x thrash: ' + b.thrashing_pages +
+            html += 'Refaulted pages: <strong>' + b.ever_refaulted_pages + '</strong> (active thrash: ' + b.thrashing_pages +
               ', total refaults: ' + b.total_refaults + ')';
             return html;
           }
