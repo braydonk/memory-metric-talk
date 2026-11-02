@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/braydonk/memory-metric-talk/mem_eviction_lab/internal/results"
+	"github.com/braydonk/memory-metric-talk/mem_eviction_lab/internal/symbols"
 )
 
 const mib = 1024.0 * 1024.0
@@ -86,6 +87,7 @@ type DashboardPayload struct {
 	MultiRun  bool               `json:"multi_run"`
 	Summaries []RunSummary       `json:"summaries"`
 	Runs      []*results.RunData `json:"runs"`
+	Packages  [][]symbols.PackageStats `json:"packages"` // per-run Go package attribution of .text pages (nil when unavailable)
 }
 
 // Generate loads one or more result directories and writes a standalone HTML dashboard.
@@ -132,6 +134,7 @@ func Generate(inputDirs []string, outputPath string) (string, error) {
 		MultiRun:  len(runs) > 1,
 		Summaries: summaries,
 		Runs:      runs,
+		Packages:  loadPackages(runs),
 	}
 
 	jsonBytes, err := json.Marshal(payload)

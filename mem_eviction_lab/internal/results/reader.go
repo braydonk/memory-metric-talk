@@ -279,6 +279,16 @@ func readSectionsCSV(path string) ([]SectionRow, error) {
 	return rows, nil
 }
 
+// LoadPages reads the optional per-page pages.csv from dir. It returns nil, nil for
+// runs recorded before pages.csv existed.
+func LoadPages(dir string) ([]BlockRow, error) {
+	rows, err := readBlocksCSV(filepath.Join(dir, PagesCSVName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return rows, err
+}
+
 func readBlocksCSV(path string) ([]BlockRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -289,7 +299,7 @@ func readBlocksCSV(path string) ([]BlockRow, error) {
 	cr := csv.NewReader(f)
 	header, err := cr.Read()
 	if err != nil {
-		return nil, fmt.Errorf("read %s header: %w", BlocksCSVName, err)
+		return nil, fmt.Errorf("read %s header: %w", filepath.Base(path), err)
 	}
 	rr := csvRowReader{idx: newCSVIndex(header)}
 
@@ -301,7 +311,7 @@ func readBlocksCSV(path string) ([]BlockRow, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read %s line %d: %w", BlocksCSVName, lineNum+1, err)
+			return nil, fmt.Errorf("read %s line %d: %w", filepath.Base(path), lineNum+1, err)
 		}
 		lineNum++
 		rr.rec = rec
@@ -324,7 +334,7 @@ func readBlocksCSV(path string) ([]BlockRow, error) {
 			TotalRefaults:        rr.u64("total_refaults"),
 		}
 		if rr.err != nil {
-			return nil, fmt.Errorf("parse %s line %d: %w", BlocksCSVName, lineNum, rr.err)
+			return nil, fmt.Errorf("parse %s line %d: %w", filepath.Base(path), lineNum, rr.err)
 		}
 		rows = append(rows, row)
 	}

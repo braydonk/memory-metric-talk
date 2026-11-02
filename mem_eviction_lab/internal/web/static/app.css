@@ -1014,3 +1014,47 @@ html, body {
     width: 100%;
   }
 }
+
+/* Go Package Attribution panel (colors match the page map legend) */
+.pkg-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.pkg-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pkg-frame-hint {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.76rem;
+}
+
+.pkg-summary {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-bottom: 8px;
+}
+
+.pkg-table td:first-child {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  word-break: break-all;
+}
+
+.pkg-sec-label {
+  color: var(--col-file-res);
+  font-weight: 600;
+}
+
+.pkg-clean { color: var(--col-evict-flash); font-weight: 600; }
+.pkg-refault { color: var(--col-refault-1); }
+.pkg-resident { color: var(--col-file-res); font-weight: 600; }
+.pkg-sub { color: var(--text-muted); }

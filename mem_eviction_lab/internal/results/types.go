@@ -6,6 +6,7 @@ const (
 	SamplesCSVName   = "samples.csv"
 	SectionsCSVName  = "sections.csv"
 	BlocksCSVName    = "blocks.csv"
+	PagesCSVName     = "pages.csv"
 	RunMetaJSONName  = "run_meta.json"
 	CollectorLogName = "collector.log"
 )

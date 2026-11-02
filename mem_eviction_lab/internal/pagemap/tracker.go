@@ -723,6 +723,46 @@ func (t *Tracker) BlockRows() []results.BlockRow {
 	return rows
 }
 
+// PageRows returns one BlockRow per tracked binary page (BlockIndex = file offset / page size),
+// sorted by file offset. It feeds pages.csv for offline symbol attribution.
+func (t *Tracker) PageRows() []results.BlockRow {
+	rows := make([]results.BlockRow, 0, len(t.pages))
+	for i := range t.pages {
+		p := &t.pages[i]
+		r := results.BlockRow{
+			BlockIndex:           int(p.fileOffset / t.pageSize),
+			FileOffsetStartBytes: p.fileOffset,
+			FileOffsetEndBytes:   p.fileOffset + t.pageSize,
+			PrimarySection:       p.section.Name,
+			VMAPerms:             p.vmaPerms,
+			TotalPages:           1,
+			TotalEvictions:       uint64(p.evictCount),
+			TotalRefaults:        uint64(p.refault01Count) + uint64(p.refaultPFNCount),
+		}
+		switch {
+		case !p.everPresent:
+			r.NeverFaultedPages = 1
+		case p.prevPresent && p.prevFileBacked:
+			r.PresentFinalPages = 1
+		case p.prevPresent:
+			r.PresentCoWFinalPages = 1
+		case r.TotalRefaults == 0:
+			r.CleanlyEvictedPages = 1
+		}
+		if r.TotalRefaults > 0 {
+			r.EverRefaultedPages = 1
+		}
+		if p.activeThrashing {
+			r.ThrashingPages = 1
+		}
+		rows = append(rows, r)
+	}
+	slices.SortFunc(rows, func(a, b results.BlockRow) int {
+		return cmp.Compare(a.FileOffsetStartBytes, b.FileOffsetStartBytes)
+	})
+	return rows
+}
+
 func topKey(m map[string]uint64) string {
 	var best string
 	var bestN uint64

@@ -219,6 +219,38 @@
         </div>
       </section>
 
+      <section class="panel" id="pkg-panel" aria-label="Go Package Attribution" style="display:none;">
+        <div class="pkg-head">
+          <h2 class="panel-heading">Go Package Attribution <span class="mono pkg-sec-label">.text</span> <span class="mono pkg-frame-hint" id="pkg-frame-hint"></span></h2>
+          <div class="pkg-controls">
+            <label for="pkg-sort" class="field-label">Sort by</label>
+            <select id="pkg-sort" class="select-input">
+              <option value="clean">One-Shot Evicted</option>
+              <option value="faulted">Ever Faulted</option>
+              <option value="refaulted">Refaulted</option>
+              <option value="resident">Resident Now</option>
+            </select>
+          </div>
+        </div>
+        <div class="pkg-summary" id="pkg-summary"></div>
+        <div class="section-table-wrap">
+          <table class="section-table pkg-table">
+            <thead>
+              <tr>
+                <th title="Go package of the functions in .text, from .gopclntab. A page shared by several functions splits its bytes between their packages.">Go Package</th>
+                <th title="Number of functions of this package in .text.">Functions</th>
+                <th title="Bytes of .text occupied by this package's functions.">Mapped</th>
+                <th title="Bytes on pages faulted into RAM at least once (% of Mapped).">Ever Faulted</th>
+                <th title="Bytes on pages evicted with 0 refaults so far (% of Ever Faulted).">One-Shot Evicted</th>
+                <th title="Bytes on pages that faulted back in at least once after eviction.">Refaulted</th>
+                <th title="Bytes on pages resident at the shown frame (% of Ever Faulted).">Resident Now</th>
+              </tr>
+            </thead>
+            <tbody id="pkg-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <details class="diag-details" id="run-diagnostics-drawer">
         <summary class="diag-summary">
           <span>Run Summary, Section Breakdown &amp; Collector Log</span>

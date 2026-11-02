@@ -551,6 +551,7 @@
     es.addEventListener("run_layout", (ev) => {
       const d = JSON.parse(ev.data);
       if (d.run_id !== state.runId) return;
+      loadSymbols(); // picks up a binary rebuilt between runs
       state.status = d.status || "running";
       // Preserve any early frames if sample raced ahead, otherwise reset to exact VMA layout.
       const prevFrames = state.frames.slice();
@@ -1609,7 +1610,9 @@
         buildTooltipRow("Virtual Page Index", `#${fmtInt(pIdx)}`) +
         buildTooltipRow("ELF File Offset", fmtHex(foff)) +
         buildTooltipRow("Page Size", fmtMiB(pageSize)) +
-        buildTooltipRow("Status", STATE_LABELS[code] || "Unknown");
+        buildTooltipRow("Status", STATE_LABELS[code] || "Unknown") +
+        packagesOnFilePage(Math.floor(foff / pageSize)).slice(0, 3)
+          .map((p) => buildTooltipRow(escHTML(p.name), p.bytes >= 1024 ? fmtMiB(p.bytes) : p.bytes + " B")).join("");
       dom.tooltip.classList.add("visible");
       positionTooltip(ev.clientX, ev.clientY);
     } else {
@@ -1917,14 +1920,162 @@
     if (state.timelineDirty) {
       renderTimelineSpark();
     }
+    maybeRenderPackages(nowPerf);
 
     requestAnimationFrame(rafLoop);
+  }
+
+  // ---- Go package attribution ----
+  // GET /api/symbols returns a static map from .text file pages to Go packages. Combined
+  // with the per-page codes already streamed for the page map, the table updates live and
+  // follows the scrubber, without the server re-reading the binary mid-run.
+  const PKG_RENDER_INTERVAL_MS = 500;
+  const pkg = {
+    key: "",
+    map: null,       // { page_size, packages: [{ package, functions, mapped_bytes }], shares }
+    shares: null,    // Uint32Array of (filePage, packageIndex, bytes) triples, sorted by page
+    layoutRef: null, // layout the index below was built for
+    fpToIdx: null,   // Int32Array: file page -> tracked page index (-1 if not mapped)
+    firstShare: null, // Int32Array: file page -> index of its first triple (-1 if none)
+    lastRenderMs: 0,
+    lastSig: "",
+  };
+  const pkgDom = {
+    panel: document.getElementById("pkg-panel"),
+    sort: document.getElementById("pkg-sort"),
+    summary: document.getElementById("pkg-summary"),
+    tbody: document.getElementById("pkg-tbody"),
+    hint: document.getElementById("pkg-frame-hint"),
+  };
+
+  function escHTML(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  }
+
+  async function loadSymbols() {
+    try {
+      const res = await fetch("/api/symbols", { cache: "no-store" });
+      if (!res.ok) {
+        pkg.map = null;
+        pkgDom.panel.style.display = "none";
+        return;
+      }
+      const body = await res.json();
+      if (body.key === pkg.key && pkg.map) return;
+      pkg.key = body.key;
+      pkg.map = body.map;
+      pkg.shares = Uint32Array.from(pkg.map.shares || []);
+      pkg.layoutRef = null;
+      pkg.lastSig = "";
+      pkgDom.panel.style.display = "";
+    } catch (_) {
+      // Keep the previous map; the next run_layout retries.
+    }
+  }
+
+  // (Re)build the file-page indexes whenever the layout object changes.
+  function ensurePkgIndex() {
+    const layout = state.layout;
+    if (!pkg.map || !layout || !layout.spans) return false;
+    const ps = Number(layout.page_size_bytes) || 4096;
+    if (ps !== pkg.map.page_size) return false;
+    if (pkg.layoutRef === layout) return true;
+
+    const shares = pkg.shares;
+    let maxFp = shares.length ? shares[shares.length - 3] : 0;
+    for (const sp of layout.spans) maxFp = Math.max(maxFp, Math.floor(sp.file_offset_bytes / ps) + sp.page_count);
+
+    pkg.fpToIdx = new Int32Array(maxFp + 1).fill(-1);
+    for (const sp of layout.spans) {
+      const fp0 = Math.floor(sp.file_offset_bytes / ps);
+      for (let k = 0; k < sp.page_count; k++) pkg.fpToIdx[fp0 + k] = sp.start_page + k;
+    }
+    pkg.firstShare = new Int32Array(maxFp + 1).fill(-1);
+    for (let i = shares.length - 3; i >= 0; i -= 3) pkg.firstShare[shares[i]] = i;
+    pkg.layoutRef = layout;
+    return true;
+  }
+
+  // Packages on one file page, largest share first (for the page map tooltip).
+  function packagesOnFilePage(fp) {
+    if (!ensurePkgIndex() || fp >= pkg.firstShare.length || pkg.firstShare[fp] < 0) return [];
+    const shares = pkg.shares;
+    const out = [];
+    for (let i = pkg.firstShare[fp]; i < shares.length && shares[i] === fp; i += 3) {
+      out.push({ name: pkg.map.packages[shares[i + 1]].package, bytes: shares[i + 2] });
+    }
+    return out.sort((a, b) => b.bytes - a.bytes);
+  }
+
+  function maybeRenderPackages(nowPerf) {
+    if (!pkg.map || nowPerf - pkg.lastRenderMs < PKG_RENDER_INTERVAL_MS) return;
+    const sig = `${state.viewIdx}:${state.frames.length}:${pkgDom.sort.value}:${state.totalPages}`;
+    if (sig === pkg.lastSig) return;
+    pkg.lastRenderMs = nowPerf;
+    pkg.lastSig = sig;
+    renderPackages();
+  }
+
+  function renderPackages() {
+    if (!ensurePkgIndex()) {
+      pkgDom.summary.textContent = "Package map does not match the current page layout.";
+      pkgDom.tbody.innerHTML = "";
+      return;
+    }
+    const rows = pkg.map.packages.map((p) => ({
+      name: p.package, functions: p.functions, mapped: p.mapped_bytes,
+      faulted: 0, clean: 0, refaulted: 0, resident: 0,
+    }));
+    const pages = getPagesAtFrame(state.viewIdx);
+    const shares = pkg.shares;
+    for (let i = 0; i < shares.length; i += 3) {
+      const idx = pkg.fpToIdx[shares[i]];
+      if (idx < 0 || idx >= pages.length) continue;
+      const c = pages[idx];
+      if (c === CODE_NEVER_FAULTED) continue;
+      const r = rows[shares[i + 1]], bytes = shares[i + 2];
+      r.faulted += bytes;
+      if (c === CODE_EVICTED_CLEAN) r.clean += bytes;
+      if (c >= CODE_EVICTED_REFAULTED && c <= CODE_REFAULT_COW) r.refaulted += bytes;
+      if (c === CODE_COLD_FAULT_FILE || c === CODE_COLD_FAULT_COW || c === CODE_PROMOTED_COW ||
+          c === CODE_REFAULT_FILE_ONCE || c === CODE_REFAULT_FILE_THRASH || c === CODE_REFAULT_COW) {
+        r.resident += bytes;
+      }
+    }
+
+    const key = pkgDom.sort.value;
+    rows.sort((a, b) => (b[key] - a[key]) || (b.faulted - a.faulted));
+    const pct = (a, b) => (b > 0 ? ((100 * a) / b).toFixed(1) + "%" : "—");
+    pkgDom.tbody.innerHTML = rows.slice(0, 25).map((r) =>
+      "<tr>" +
+      `<td>${escHTML(r.name)}</td>` +
+      `<td>${fmtInt(r.functions)}</td>` +
+      `<td>${fmtMiB(r.mapped)}</td>` +
+      `<td>${fmtMiB(r.faulted)} <span class="pkg-sub">(${pct(r.faulted, r.mapped)})</span></td>` +
+      `<td><span class="${r.clean > 0 ? "pkg-clean" : ""}">${fmtMiB(r.clean)}</span> <span class="pkg-sub">(${pct(r.clean, r.faulted)})</span></td>` +
+      `<td>${r.refaulted > 0 ? `<span class="pkg-refault">${fmtMiB(r.refaulted)}</span>` : '<span class="pkg-sub">—</span>'}</td>` +
+      `<td><span class="pkg-resident">${fmtMiB(r.resident)}</span> <span class="pkg-sub">(${pct(r.resident, r.faulted)})</span></td>` +
+      "</tr>"
+    ).join("");
+
+    const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
+    const touched = rows.filter((r) => r.faulted > 0).length;
+    pkgDom.summary.innerHTML =
+      `<strong>${fmtInt(touched)}</strong> of ${fmtInt(rows.length)} packages had code loaded ` +
+      `(${fmtMiB(sum("faulted"))} of ${fmtMiB(sum("mapped"))} of <code>.text</code>) · ` +
+      `<span class="pkg-clean">${fmtMiB(sum("clean"))}</span> evicted with 0 refaults · ` +
+      `<span class="pkg-refault">${fmtMiB(sum("refaulted"))}</span> refaulted · ` +
+      `<span class="pkg-resident">${fmtMiB(sum("resident"))}</span> resident`;
+
+    const f = state.frames[state.viewIdx];
+    pkgDom.hint.textContent = f && f.row ? `@ t = ${((f.row.elapsed_ms || 0) / 1000).toFixed(2)}s` : "";
   }
 
   // Boot
   bindEvents();
   syncFullState().then(() => {
     connectSSE();
+    loadSymbols();
     requestAnimationFrame(rafLoop);
   });
 })();

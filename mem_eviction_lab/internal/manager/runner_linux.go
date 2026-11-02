@@ -508,6 +508,9 @@ func Run(ctx context.Context, opts Options, logger *log.Logger) (retErr error) {
 			if err := resWriter.WriteBlocks(tracker.BlockRows()); err != nil {
 				return err
 			}
+			if err := resWriter.WritePages(tracker.PageRows()); err != nil {
+				return err
+			}
 		}
 	}
 

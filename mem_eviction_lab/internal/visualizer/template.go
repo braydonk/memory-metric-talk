@@ -329,6 +329,8 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       font-size: 0.77rem;
     }
     #section-analysis-table tbody tr { cursor: default; }
+    #package-analysis-table tbody tr { cursor: default; }
+    #package-analysis-table td:first-child { word-break: break-all; font-family: ui-monospace, monospace; font-size: 0.8rem; }
 
     th[data-tip] {
       cursor: help;
@@ -648,6 +650,36 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
               <th tabindex="0" data-tip="Distinct binary memory in this section evicted at least once (cleanly_evicted + ever_refaulted).">Unique Reclaimed</th>
               <th tabindex="0" data-tip="Percentage of Unique Reclaimed pages in this section that had to fault back into RAM at least once (ever_refaulted / ever_evicted).">Reclaimed Refault %</th>
               <th tabindex="0" data-tip="Memory remaining resident on the final live snapshot (clean file + private CoW pages, and % of Ever Faulted).">Final Resident</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card chart-full" id="package-analysis-card">
+      <h3>Go Package Attribution of <code>.text</code> (Which Code Was Evicted, Refaulted or Kept)</h3>
+      <div id="package-insight-banner" class="insight-banner"></div>
+      <label class="subtle" style="display:block; margin-bottom:8px;">Sort by
+        <select id="package-sort">
+          <option value="cleanly_evicted_bytes">One-Shot Evicted</option>
+          <option value="faulted_bytes">Ever Faulted</option>
+          <option value="refaulted_bytes">Refaulted</option>
+          <option value="final_resident_bytes">Final Resident</option>
+        </select>
+        (top 30)
+      </label>
+      <div class="table-wrap" style="margin-bottom:0;">
+        <table id="package-analysis-table">
+          <thead>
+            <tr>
+              <th tabindex="0" data-tip="Go package of the functions in .text, from .gopclntab function names (debug/gosym). A page shared by several functions splits its bytes between their packages.">Go Package</th>
+              <th tabindex="0" data-tip="Number of functions of this package in .text.">Functions</th>
+              <th tabindex="0" data-tip="Bytes of .text occupied by this package's functions.">Mapped</th>
+              <th tabindex="0" data-tip="Bytes of this package's code on pages faulted into RAM at least once (% of Mapped). A page shared by several functions splits its bytes between them.">Ever Faulted</th>
+              <th tabindex="0" data-tip="Bytes on pages evicted and never faulted back (% of Ever Faulted): code that ran (usually init()) and was not needed again.">One-Shot Evicted</th>
+              <th tabindex="0" data-tip="Bytes on pages that had to fault back in at least once after eviction: code that was still in use.">Refaulted</th>
+              <th tabindex="0" data-tip="Bytes on pages resident on the final live snapshot (% of Ever Faulted).">Final Resident</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -1289,6 +1321,7 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
         ]
       }, true);
       renderSectionAnalysis(run, sum, ps);
+      renderPackageAnalysis(sum.index);
 
       // 8. Spatial Binary File-Offset Map
       const blks = run.blocks || [];
@@ -1438,6 +1471,47 @@ const dashboardHTMLTemplate = `<!DOCTYPE html>
       document.getElementById('section-insight-banner').innerHTML =
         '<ul>' + bullets.join('') + '</ul>' +
         '<div class="caveat">Note: <em>One-Shot Evicted (% of Faulted)</em> is a conservative lower bound on startup-only bloat &mdash; startup symbols sharing a 4 KiB page with active steady-state code/data, or pages the LRU never needed to evict, cannot prove 0 refaults.</div>';
+    }
+
+    function renderPackageAnalysis(runIdx) {
+      const card = document.getElementById('package-analysis-card');
+      const pkgs = (PAYLOAD.packages || [])[runIdx]; // .text rows only (see packages.go)
+      if (!pkgs || !pkgs.length) {
+        card.style.display = 'none';
+        return;
+      }
+      card.style.display = '';
+      const mb = (v) => fmtMiB(v / MIB);
+      const pct = (n, d) => d > 0 ? (100 * n / d).toFixed(1) + '%' : '&mdash;';
+      const esc = (s) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      const sum = (k) => pkgs.reduce((s, p) => s + p[k], 0);
+      const sortSel = document.getElementById('package-sort');
+      sortSel.onchange = () => renderPackageAnalysis(runIdx);
+
+      const key = sortSel.value;
+      const sorted = pkgs.slice().sort((a, b) => (b[key] - a[key]) || (b.faulted_bytes - a.faulted_bytes));
+      document.querySelector('#package-analysis-table tbody').innerHTML = sorted.slice(0, 30).map(p =>
+        '<tr>' +
+        '<td>' + esc(p.package) + '</td>' +
+        '<td>' + fmtInt(p.functions) + '</td>' +
+        '<td>' + mb(p.mapped_bytes) + '</td>' +
+        '<td>' + mb(p.faulted_bytes) + ' <span class="subtle">(' + pct(p.faulted_bytes, p.mapped_bytes) + ')</span></td>' +
+        '<td><strong class="' + (p.cleanly_evicted_bytes > 0 ? 'pct-good' : '') + '">' + mb(p.cleanly_evicted_bytes) + '</strong> <span class="subtle">(' + pct(p.cleanly_evicted_bytes, p.faulted_bytes) + ')</span></td>' +
+        '<td>' + (p.refaulted_bytes > 0 ? '<span class="pct-warn">' + mb(p.refaulted_bytes) + '</span>' : '<span class="subtle">&mdash;</span>') + '</td>' +
+        '<td><strong>' + mb(p.final_resident_bytes) + '</strong> <span class="subtle">(' + pct(p.final_resident_bytes, p.faulted_bytes) + ')</span></td>' +
+        '</tr>'
+      ).join('');
+
+      const faulted = sum('faulted_bytes');
+      const clean = sum('cleanly_evicted_bytes');
+      const touched = pkgs.filter(p => p.faulted_bytes > 0).length;
+      document.getElementById('package-insight-banner').innerHTML =
+        '<ul>' +
+        '<li><strong>' + fmtInt(touched) + '</strong> of ' + fmtInt(pkgs.length) + ' Go packages had code loaded into RAM (' + mb(faulted) + ' of ' + mb(sum('mapped_bytes')) + ' of <code>.text</code>).</li>' +
+        '<li><strong class="pct-good">' + mb(clean) + '</strong> (' + pct(clean, faulted) + ' of loaded code) was evicted and never needed again; ' +
+        '<strong>' + mb(sum('refaulted_bytes')) + '</strong> had to refault.</li>' +
+        '</ul>' +
+        '<div class="caveat">Bytes are split by overlap when several functions share a 4 KiB page, so one hot function keeps its page neighbours resident. "Loaded" includes neighbouring pages the kernel maps around each fault, not only code that ran.</div>';
     }
 
     initDashboard();

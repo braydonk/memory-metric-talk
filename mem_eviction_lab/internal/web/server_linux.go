@@ -148,6 +148,8 @@ type Server struct {
 
 	subsMu sync.Mutex
 	subs   map[chan sseMessage]struct{}
+
+	symbols symbolCache // GET /api/symbols page -> package map
 }
 
 // Serve validates prerequisites, binds strictly to 127.0.0.1:<port>, and runs the HTTP server until ctx is cancelled.
@@ -284,13 +286,15 @@ func NewServer(ctx context.Context, opts ServerOptions, logger *log.Logger) (*Se
 		PreviewLayout:         buildPreviewLayout(cfg.CollectorBinary, cfg.BlockSizePages),
 	}
 
-	return &Server{
+	srv := &Server{
 		baseOpts: opts,
 		cfgSum:   cfgSum,
 		logger:   logger,
 		rootCtx:  ctx,
 		subs:     make(map[chan sseMessage]struct{}),
-	}, nil
+	}
+	srv.refreshSymbols()
+	return srv, nil
 }
 
 // WaitActiveRun blocks until any currently executing benchmark run finishes tearing down.
@@ -318,6 +322,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/run/stop", s.requireSameOriginJSON(s.handleRunStop))
 	mux.HandleFunc("POST /api/run/memory-max", s.requireSameOriginJSON(s.handleSetMemoryMax))
 	mux.HandleFunc("POST /api/run/reclaim", s.requireSameOriginJSON(s.handleReclaim))
+	mux.HandleFunc("GET /api/symbols", s.handleGetSymbols)
 	mux.Handle("GET /", staticServer)
 	return mux
 }
@@ -574,6 +579,9 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	runOpts.ResultsDir = resultsSubdir
 	runOpts.StopCh = stopCh
 	runOpts.Hooks = s.makeRunHooks(runID)
+
+	// Before manager drops the binary page cache: picks up a rebuilt binary between runs.
+	s.refreshSymbols()
 
 	go func() {
 		defer close(doneCh)
