@@ -143,9 +143,18 @@ func (w *Writer) WriteSections(rows []SectionRow) error {
 
 // WriteBlocks writes blocks.csv from the finalized binary offset block rollup.
 func (w *Writer) WriteBlocks(rows []BlockRow) error {
-	f, err := os.OpenFile(filepath.Join(w.dir, BlocksCSVName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	return w.writeBlockRows(BlocksCSVName, rows)
+}
+
+// WritePages writes pages.csv: blocks.csv columns at single-page granularity.
+func (w *Writer) WritePages(rows []BlockRow) error {
+	return w.writeBlockRows(PagesCSVName, rows)
+}
+
+func (w *Writer) writeBlockRows(name string, rows []BlockRow) error {
+	f, err := os.OpenFile(filepath.Join(w.dir, name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("create %s: %w", BlocksCSVName, err)
+		return fmt.Errorf("create %s: %w", name, err)
 	}
 	defer f.Close()
 
