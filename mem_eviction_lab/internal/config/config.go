@@ -35,20 +35,21 @@ const (
 
 // Config represents the run YAML configuration for mem_eviction_lab.
 type Config struct {
-	Name            string            `yaml:"name" json:"name"`
-	CollectorBinary string            `yaml:"collector_binary" json:"collector_binary"`
-	CollectorConfig string            `yaml:"collector_config" json:"collector_config"`
-	CollectorArgs   []string          `yaml:"collector_args,omitempty" json:"collector_args,omitempty"`
-	MemoryLimit     string            `yaml:"memory_limit" json:"memory_limit"`
-	SwapMax         string            `yaml:"swap_max" json:"swap_max"`
-	SampleInterval  time.Duration     `yaml:"sample_interval" json:"sample_interval"`
-	EventDebounce   time.Duration     `yaml:"event_debounce" json:"event_debounce"`
-	StartupTimeout  time.Duration     `yaml:"startup_timeout" json:"startup_timeout"`
-	ShutdownTimeout time.Duration     `yaml:"shutdown_timeout" json:"shutdown_timeout"`
-	BlockSizePages  int               `yaml:"block_size_pages" json:"block_size_pages"`
-	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	Backend         BackendConfig     `yaml:"backend" json:"backend"`
-	Workload        WorkloadConfig    `yaml:"workload" json:"workload"`
+	Name              string            `yaml:"name" json:"name"`
+	CollectorBinary   string            `yaml:"collector_binary" json:"collector_binary"`
+	CollectorBinaries []string          `yaml:"collector_binaries,omitempty" json:"collector_binaries,omitempty"`
+	CollectorConfig   string            `yaml:"collector_config" json:"collector_config"`
+	CollectorArgs     []string          `yaml:"collector_args,omitempty" json:"collector_args,omitempty"`
+	MemoryLimit       string            `yaml:"memory_limit" json:"memory_limit"`
+	SwapMax           string            `yaml:"swap_max" json:"swap_max"`
+	SampleInterval    time.Duration     `yaml:"sample_interval" json:"sample_interval"`
+	EventDebounce     time.Duration     `yaml:"event_debounce" json:"event_debounce"`
+	StartupTimeout    time.Duration     `yaml:"startup_timeout" json:"startup_timeout"`
+	ShutdownTimeout   time.Duration     `yaml:"shutdown_timeout" json:"shutdown_timeout"`
+	BlockSizePages    int               `yaml:"block_size_pages" json:"block_size_pages"`
+	Env               map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	Backend           BackendConfig     `yaml:"backend" json:"backend"`
+	Workload          WorkloadConfig    `yaml:"workload" json:"workload"`
 
 	parsedMemLimit bytefmt.Limit
 	parsedSwapMax  bytefmt.Limit
@@ -86,11 +87,18 @@ func (c *Config) ParsedSwapMax() bytefmt.Limit {
 // Load reads, applies defaults, resolves paths, and validates a run YAML file.
 // If memoryLimitOverride is non-empty, it replaces memory_limit from the YAML file.
 func Load(path string, memoryLimitOverride string) (*Config, error) {
-	return LoadWithOverrides(path, memoryLimitOverride, "")
+	return LoadWithBinaryOverrides(path, memoryLimitOverride, "", nil)
 }
 
 // LoadWithOverrides reads and validates a run YAML file with optional overrides for memory_limit and swap_max.
 func LoadWithOverrides(path, memoryLimitOverride, swapMaxOverride string) (*Config, error) {
+	return LoadWithBinaryOverrides(path, memoryLimitOverride, swapMaxOverride, nil)
+}
+
+// LoadWithBinaryOverrides reads and validates a run YAML file with optional overrides for
+// memory_limit, swap_max, and collector_binaries. When collectorBinariesOverride contains
+// at least one non-empty path, it replaces the YAML collector_binary / collector_binaries list.
+func LoadWithBinaryOverrides(path, memoryLimitOverride, swapMaxOverride string, collectorBinariesOverride []string) (*Config, error) {
 	absCfgPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve config path %q: %w", path, err)
@@ -115,23 +123,73 @@ func LoadWithOverrides(path, memoryLimitOverride, swapMaxOverride string) (*Conf
 	}
 
 	baseDir := filepath.Dir(absCfgPath)
-	if err := cfg.applyDefaultsAndValidate(baseDir); err != nil {
+	if err := cfg.applyDefaultsAndValidate(baseDir, collectorBinariesOverride); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
 }
 
-func (c *Config) applyDefaultsAndValidate(baseDir string) error {
+func (c *Config) applyDefaultsAndValidate(baseDir string, collectorBinariesOverride []string) error {
 	c.Name = strings.TrimSpace(c.Name)
 	if c.Name == "" {
 		return errors.New("config: name is required")
 	}
 
-	var err error
-	c.CollectorBinary, err = resolveLocalFile("collector_binary", c.CollectorBinary, baseDir)
-	if err != nil {
-		return err
+	var cliBins []string
+	for _, rawBin := range collectorBinariesOverride {
+		if trimmed := strings.TrimSpace(rawBin); trimmed != "" {
+			cliBins = append(cliBins, trimmed)
+		}
 	}
+
+	var resolvedBins []string
+	seenBins := make(map[string]struct{})
+	addResolvedBin := func(field, rawPath, relBase string) error {
+		resolved, rerr := resolveLocalFile(field, rawPath, relBase)
+		if rerr != nil {
+			return rerr
+		}
+		if _, exists := seenBins[resolved]; !exists {
+			seenBins[resolved] = struct{}{}
+			resolvedBins = append(resolvedBins, resolved)
+		}
+		return nil
+	}
+
+	if len(cliBins) > 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("resolve working directory: %w", err)
+		}
+		for _, rawBin := range cliBins {
+			if err := addResolvedBin("collector_binary", rawBin, cwd); err != nil {
+				return err
+			}
+		}
+	} else {
+		var rawYAMLBins []string
+		if strings.TrimSpace(c.CollectorBinary) != "" {
+			rawYAMLBins = append(rawYAMLBins, c.CollectorBinary)
+		}
+		for _, b := range c.CollectorBinaries {
+			if strings.TrimSpace(b) == "" {
+				return errors.New("config: collector_binaries entries must not be empty")
+			}
+			rawYAMLBins = append(rawYAMLBins, b)
+		}
+		if len(rawYAMLBins) == 0 {
+			return errors.New("config: collector_binary is required")
+		}
+		for _, rawBin := range rawYAMLBins {
+			if err := addResolvedBin("collector_binary", rawBin, baseDir); err != nil {
+				return err
+			}
+		}
+	}
+	c.CollectorBinaries = resolvedBins
+	c.CollectorBinary = resolvedBins[0]
+
+	var err error
 	c.CollectorConfig, err = resolveLocalFile("collector_config", c.CollectorConfig, baseDir)
 	if err != nil {
 		return err

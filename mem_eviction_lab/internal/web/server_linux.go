@@ -54,22 +54,32 @@ type ServerOptions struct {
 	SkipPreflight bool // used by unit tests without root/cgroups
 }
 
+// CollectorBinaryOption describes one pre-validated Collector binary selectable in the web UI.
+type CollectorBinaryOption struct {
+	Path          string             `json:"path"`
+	Name          string             `json:"name"`
+	Size          uint64             `json:"size"`
+	ELFSections   []elfmap.Section   `json:"elf_sections"`
+	PreviewLayout *manager.RunLayout `json:"preview_layout,omitempty"`
+}
+
 // ConfigSummary presents static configuration defaults and binary section metadata to the UI.
 type ConfigSummary struct {
-	Name                  string             `json:"name"`
-	ConfigPath            string             `json:"config_path"`
-	CollectorBinary       string             `json:"collector_binary"`
-	CollectorBinarySize   uint64             `json:"collector_binary_size"`
-	CollectorConfig       string             `json:"collector_config"`
-	DefaultMemoryLimit    string             `json:"default_memory_limit"`
-	DefaultSwapMax        string             `json:"default_swap_max"`
-	DefaultDuration       string             `json:"default_duration"`
-	BaseResultsDir        string             `json:"base_results_dir,omitempty"`
-	WorkloadEnabled       bool               `json:"workload_enabled"`
-	BackendEnabled        bool               `json:"backend_enabled"`
-	CollectorGRPCEndpoint string             `json:"collector_grpc_endpoint,omitempty"`
-	ELFSections           []elfmap.Section   `json:"elf_sections"`
-	PreviewLayout         *manager.RunLayout `json:"preview_layout,omitempty"`
+	Name                  string                  `json:"name"`
+	ConfigPath            string                  `json:"config_path"`
+	CollectorBinary       string                  `json:"collector_binary"`
+	CollectorBinarySize   uint64                  `json:"collector_binary_size"`
+	CollectorBinaries     []CollectorBinaryOption `json:"collector_binaries"`
+	CollectorConfig       string                  `json:"collector_config"`
+	DefaultMemoryLimit    string                  `json:"default_memory_limit"`
+	DefaultSwapMax        string                  `json:"default_swap_max"`
+	DefaultDuration       string                  `json:"default_duration"`
+	BaseResultsDir        string                  `json:"base_results_dir,omitempty"`
+	WorkloadEnabled       bool                    `json:"workload_enabled"`
+	BackendEnabled        bool                    `json:"backend_enabled"`
+	CollectorGRPCEndpoint string                  `json:"collector_grpc_endpoint,omitempty"`
+	ELFSections           []elfmap.Section        `json:"elf_sections"`
+	PreviewLayout         *manager.RunLayout      `json:"preview_layout,omitempty"`
 }
 
 // SampleFrame represents one recorded benchmark sample and its packed uint32 visual deltas.
@@ -98,6 +108,8 @@ type RunSnapshot struct {
 	RunID                       uint64               `json:"run_id"`
 	Status                      string               `json:"status"`
 	StartedAtUnixMs             int64                `json:"started_at_unix_ms"`
+	CollectorBinary             string               `json:"collector_binary"`
+	CollectorBinarySize         uint64               `json:"collector_binary_size"`
 	InitialMemoryLimitHuman     string               `json:"initial_memory_limit_human"`
 	InitialMemoryLimitUnlimited bool                 `json:"initial_memory_limit_unlimited"`
 	InitialMemoryLimitBytes     uint64               `json:"initial_memory_limit_bytes"`
@@ -219,15 +231,16 @@ func NewServer(ctx context.Context, opts ServerOptions, logger *log.Logger) (*Se
 		opts.RunFn = manager.Run
 	}
 
-	cfg, err := config.Load(opts.ManagerOpts.ConfigPath, opts.ManagerOpts.MemoryLimitOverride)
+	cfg, err := config.LoadWithBinaryOverrides(
+		opts.ManagerOpts.ConfigPath,
+		opts.ManagerOpts.MemoryLimitOverride,
+		opts.ManagerOpts.SwapMaxOverride,
+		opts.ManagerOpts.CollectorBinariesOverride,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	var (
-		sections []elfmap.Section
-		binSize  uint64
-	)
 	if !opts.SkipPreflight {
 		if os.Geteuid() != 0 {
 			return nil, errors.New("manager must be run as root (e.g. via sudo) to create cgroups and read /proc/[pid]/pagemap PFNs")
@@ -235,27 +248,45 @@ func NewServer(ctx context.Context, opts ServerOptions, logger *log.Logger) (*Se
 		if err := cgroup.CheckUnifiedMount(opts.ManagerOpts.CgroupRoot); err != nil {
 			return nil, err
 		}
-		elfLayout, err := elfmap.Parse(cfg.CollectorBinary)
-		if err != nil {
-			return nil, err
-		}
-		sections = elfLayout.Sections
-		binID, err := pagecache.StatFileID(cfg.CollectorBinary)
-		if err != nil {
-			return nil, err
-		}
-		binSize = binID.Size
 		if _, err := pagecache.StatFileID(cfg.CollectorConfig); err != nil {
 			return nil, err
 		}
-	} else {
-		if st, serr := os.Stat(cfg.CollectorBinary); serr == nil {
-			binSize = uint64(st.Size())
-		}
-		if elfLayout, eerr := elfmap.Parse(cfg.CollectorBinary); eerr == nil {
-			sections = elfLayout.Sections
-		}
 	}
+
+	binOpts := make([]CollectorBinaryOption, 0, len(cfg.CollectorBinaries))
+	for _, binPath := range cfg.CollectorBinaries {
+		var (
+			sections []elfmap.Section
+			binSize  uint64
+		)
+		if !opts.SkipPreflight {
+			elfLayout, err := elfmap.Parse(binPath)
+			if err != nil {
+				return nil, err
+			}
+			sections = elfLayout.Sections
+			binID, err := pagecache.StatFileID(binPath)
+			if err != nil {
+				return nil, err
+			}
+			binSize = binID.Size
+		} else {
+			if st, serr := os.Stat(binPath); serr == nil {
+				binSize = uint64(st.Size())
+			}
+			if elfLayout, eerr := elfmap.Parse(binPath); eerr == nil {
+				sections = elfLayout.Sections
+			}
+		}
+		binOpts = append(binOpts, CollectorBinaryOption{
+			Path:          binPath,
+			Name:          filepath.Base(binPath),
+			Size:          binSize,
+			ELFSections:   sections,
+			PreviewLayout: buildPreviewLayout(binPath, cfg.BlockSizePages),
+		})
+	}
+	defaultBin := binOpts[0]
 
 	var baseResultsDir string
 	if strings.TrimSpace(opts.ManagerOpts.ResultsDir) != "" {
@@ -270,8 +301,9 @@ func NewServer(ctx context.Context, opts ServerOptions, logger *log.Logger) (*Se
 	cfgSum := ConfigSummary{
 		Name:                  cfg.Name,
 		ConfigPath:            absCfg,
-		CollectorBinary:       cfg.CollectorBinary,
-		CollectorBinarySize:   binSize,
+		CollectorBinary:       defaultBin.Path,
+		CollectorBinarySize:   defaultBin.Size,
+		CollectorBinaries:     binOpts,
 		CollectorConfig:       cfg.CollectorConfig,
 		DefaultMemoryLimit:    cfg.MemoryLimit,
 		DefaultSwapMax:        cfg.SwapMax,
@@ -280,8 +312,8 @@ func NewServer(ctx context.Context, opts ServerOptions, logger *log.Logger) (*Se
 		WorkloadEnabled:       cfg.Workload.Enabled,
 		BackendEnabled:        cfg.Backend.Enabled,
 		CollectorGRPCEndpoint: cfg.Workload.CollectorGRPCEndpoint,
-		ELFSections:           sections,
-		PreviewLayout:         buildPreviewLayout(cfg.CollectorBinary, cfg.BlockSizePages),
+		ELFSections:           defaultBin.ELFSections,
+		PreviewLayout:         defaultBin.PreviewLayout,
 	}
 
 	return &Server{
@@ -452,15 +484,40 @@ func (s *Server) broadcast(event string, payload any) {
 }
 
 type startRunRequest struct {
-	MemoryLimit string `json:"memory_limit"`
-	SwapMax     string `json:"swap_max"`
-	Duration    string `json:"duration"`
+	CollectorBinary string `json:"collector_binary"`
+	MemoryLimit     string `json:"memory_limit"`
+	SwapMax         string `json:"swap_max"`
+	Duration        string `json:"duration"`
+}
+
+func (s *Server) resolveBinaryOption(raw string) (CollectorBinaryOption, bool) {
+	q := strings.TrimSpace(raw)
+	if q == "" && len(s.cfgSum.CollectorBinaries) > 0 {
+		return s.cfgSum.CollectorBinaries[0], true
+	}
+	for _, opt := range s.cfgSum.CollectorBinaries {
+		if opt.Path == q {
+			return opt, true
+		}
+	}
+	for _, opt := range s.cfgSum.CollectorBinaries {
+		if opt.Name == q {
+			return opt, true
+		}
+	}
+	return CollectorBinaryOption{}, false
 }
 
 func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	var req startRunRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	selectedBin, ok := s.resolveBinaryOption(req.CollectorBinary)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("unknown collector_binary %q (must match one of the configured binaries)", req.CollectorBinary))
 		return
 	}
 
@@ -514,12 +571,23 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 
 	var resultsSubdir string
 	if s.cfgSum.BaseResultsDir != "" {
-		dirName := fmt.Sprintf("%s-%s-%s-%d",
-			sanitizePathToken(s.cfgSum.Name),
-			sanitizePathToken(memRaw),
-			now.Format("20060102-150405"),
-			runID,
-		)
+		var dirName string
+		if len(s.cfgSum.CollectorBinaries) > 1 {
+			dirName = fmt.Sprintf("%s-%s-%s-%s-%d",
+				sanitizePathToken(s.cfgSum.Name),
+				sanitizePathToken(selectedBin.Name),
+				sanitizePathToken(memRaw),
+				now.Format("20060102-150405"),
+				runID,
+			)
+		} else {
+			dirName = fmt.Sprintf("%s-%s-%s-%d",
+				sanitizePathToken(s.cfgSum.Name),
+				sanitizePathToken(memRaw),
+				now.Format("20060102-150405"),
+				runID,
+			)
+		}
 		resultsSubdir = filepath.Join(s.cfgSum.BaseResultsDir, dirName)
 	}
 
@@ -527,6 +595,8 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		RunID:                       runID,
 		Status:                      StatusStarting,
 		StartedAtUnixMs:             now.UnixMilli(),
+		CollectorBinary:             selectedBin.Path,
+		CollectorBinarySize:         selectedBin.Size,
 		InitialMemoryLimitHuman:     memLim.Human(),
 		InitialMemoryLimitUnlimited: memLim.Unlimited,
 		InitialMemoryLimitBytes:     memLim.Bytes,
@@ -534,12 +604,12 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitHuman:            memLim.Human(),
 		MemoryLimitUnlimited:        memLim.Unlimited,
 		MemoryLimitBytes:            memLim.Bytes,
-		SwapMaxRaw:           swapRaw,
-		ConfiguredDuration:   dur.String(),
-		DurationMsTarget:     dur.Milliseconds(),
-		ResultsSubdir:        resultsSubdir,
-		Frames:               make([]SampleFrame, 0, 512),
-		Markers:              make([]TimelineMarker, 0, 8),
+		SwapMaxRaw:                  swapRaw,
+		ConfiguredDuration:          dur.String(),
+		DurationMsTarget:            dur.Milliseconds(),
+		ResultsSubdir:               resultsSubdir,
+		Frames:                      make([]SampleFrame, 0, 512),
+		Markers:                     make([]TimelineMarker, 0, 8),
 	}
 
 	s.activeRun = snap
@@ -553,6 +623,8 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 		"run_id":                 snap.RunID,
 		"status":                 snap.Status,
 		"started_at_unix_ms":     snap.StartedAtUnixMs,
+		"collector_binary":       snap.CollectorBinary,
+		"collector_binary_size":  snap.CollectorBinarySize,
 		"memory_limit_raw":       snap.MemoryLimitRaw,
 		"memory_limit_human":     snap.MemoryLimitHuman,
 		"memory_limit_unlimited": snap.MemoryLimitUnlimited,
@@ -568,6 +640,7 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 
 	runOpts := s.baseOpts.ManagerOpts
 	runOpts.WebMode = true
+	runOpts.CollectorBinariesOverride = []string{selectedBin.Path}
 	runOpts.Duration = dur
 	runOpts.MemoryLimitOverride = memRaw
 	runOpts.SwapMaxOverride = swapRaw
@@ -778,7 +851,6 @@ func (s *Server) handleSetMemoryMax(w http.ResponseWriter, r *http.Request) {
 	}
 	ctrl := s.ctrl
 	runID := s.activeRun.RunID
-	elapsedMs := s.currentElapsedLocked()
 	s.mu.Unlock()
 
 	if err := ctrl.SetMemoryMax(lim); err != nil {
@@ -786,6 +858,8 @@ func (s *Server) handleSetMemoryMax(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.mu.Lock()
+	elapsedMs := s.currentElapsedLocked()
 	mk := TimelineMarker{
 		Kind:                 "limit_change",
 		ElapsedMs:            elapsedMs,
@@ -796,8 +870,6 @@ func (s *Server) handleSetMemoryMax(w http.ResponseWriter, r *http.Request) {
 		MemoryLimitUnlimited: lim.Unlimited,
 		MemoryLimitBytes:     lim.Bytes,
 	}
-
-	s.mu.Lock()
 	if s.activeRun != nil && s.activeRun.RunID == runID {
 		s.activeRun.MemoryLimitRaw = raw
 		s.activeRun.MemoryLimitHuman = lim.Human()
@@ -844,10 +916,19 @@ func (s *Server) handleReclaim(w http.ResponseWriter, r *http.Request) {
 	}
 	ctrl := s.ctrl
 	runID := s.activeRun.RunID
-	elapsedMs := s.currentElapsedLocked()
-	var latestFileBytes uint64
+	var (
+		hasBeforeRow    bool
+		beforeRow       results.SampleRow
+		latestFileBytes uint64
+		pageSize        uint64 = 4096
+	)
+	if s.activeRun.Layout != nil && s.activeRun.Layout.PageSizeBytes > 0 {
+		pageSize = s.activeRun.Layout.PageSizeBytes
+	}
 	if n := len(s.activeRun.Frames); n > 0 {
-		latestFileBytes = s.activeRun.Frames[n-1].Row.CGFileBytes
+		beforeRow = s.activeRun.Frames[n-1].Row
+		hasBeforeRow = true
+		latestFileBytes = max(beforeRow.CGFileBytes, beforeRow.BinPresentFilePages*pageSize)
 	}
 	s.mu.Unlock()
 
@@ -873,9 +954,35 @@ func (s *Server) handleReclaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.mu.Lock()
+	elapsedMs := s.currentElapsedLocked()
+	var (
+		mappedEvictedBytes     uint64
+		unmappedReclaimedBytes uint64
+	)
+	if hasBeforeRow && s.activeRun != nil && s.activeRun.RunID == runID && len(s.activeRun.Frames) > 0 {
+		afterRow := s.activeRun.Frames[len(s.activeRun.Frames)-1].Row
+		evPages := afterRow.DeltaEvictions
+		if beforeRow.BinPresentFilePages > afterRow.BinPresentFilePages {
+			evPages = max(evPages, beforeRow.BinPresentFilePages-afterRow.BinPresentFilePages)
+		}
+		mappedEvictedBytes = evPages * pageSize
+
+		beforeUnmapped := results.UnmappedFileCacheBytes(beforeRow.CGFileBytes, beforeRow.CGFileMappedBytes)
+		afterUnmapped := results.UnmappedFileCacheBytes(afterRow.CGFileBytes, afterRow.CGFileMappedBytes)
+		if beforeUnmapped > afterUnmapped {
+			unmappedReclaimedBytes = beforeUnmapped - afterUnmapped
+		}
+	}
+
 	reclaimedHuman := bytefmt.FormatIEC(reclaimed)
 	targetHuman := bytefmt.FormatIEC(targetBytes)
 	detail := fmt.Sprintf("memory.reclaim(%s) freed %s", targetHuman, reclaimedHuman)
+	if mappedEvictedBytes > 0 || unmappedReclaimedBytes > 0 {
+		detail += fmt.Sprintf(" (%s mapped binary PTEs, %s unmapped readahead cache)",
+			bytefmt.FormatIEC(mappedEvictedBytes),
+			bytefmt.FormatIEC(unmappedReclaimedBytes))
+	}
 	if partial {
 		detail += " (reached active/unreclaimable LRU floor)"
 	}
@@ -889,7 +996,6 @@ func (s *Server) handleReclaim(w http.ResponseWriter, r *http.Request) {
 		Partial:        partial,
 	}
 
-	s.mu.Lock()
 	if s.activeRun != nil && s.activeRun.RunID == runID {
 		s.activeRun.Markers = append(s.activeRun.Markers, mk)
 	}
@@ -900,13 +1006,15 @@ func (s *Server) handleReclaim(w http.ResponseWriter, r *http.Request) {
 		"marker": mk,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"run_id":          runID,
-		"target_bytes":    targetBytes,
-		"target_human":    targetHuman,
-		"reclaimed_bytes": reclaimed,
-		"reclaimed_human": reclaimedHuman,
-		"partial":         partial,
-		"detail":          detail,
+		"run_id":                   runID,
+		"target_bytes":             targetBytes,
+		"target_human":             targetHuman,
+		"reclaimed_bytes":          reclaimed,
+		"reclaimed_human":          reclaimedHuman,
+		"mapped_evicted_bytes":     mappedEvictedBytes,
+		"unmapped_reclaimed_bytes": unmappedReclaimedBytes,
+		"partial":                  partial,
+		"detail":                   detail,
 	})
 }
 

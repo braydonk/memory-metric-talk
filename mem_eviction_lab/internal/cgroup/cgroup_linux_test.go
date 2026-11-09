@@ -16,6 +16,7 @@ import (
 func TestParseStatEventsAndPressure(t *testing.T) {
 	statRaw := []byte(`anon 41943040
 file 12582912
+file_mapped 10485760
 kernel 1048576
 active_file 8388608
 inactive_file 4194304
@@ -28,7 +29,7 @@ workingset_activate_file 34
 	if err != nil {
 		t.Fatalf("ParseStat: %v", err)
 	}
-	if st.AnonBytes != 41943040 || st.FileBytes != 12582912 || st.KernelBytes != 1048576 ||
+	if st.AnonBytes != 41943040 || st.FileBytes != 12582912 || st.FileMappedBytes != 10485760 || st.KernelBytes != 1048576 ||
 		st.ActiveFileBytes != 8388608 || st.InactiveFileBytes != 4194304 ||
 		st.Pgfault != 12345 || st.Pgmajfault != 67 ||
 		st.WorkingsetRefaultFile != 89 || st.WorkingsetActivateFile != 34 {

@@ -801,6 +801,25 @@ html, body {
   height: 28px;
   padding: 0 8px;
   outline: none;
+  transition: border-color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.select-input:focus {
+  border-color: var(--status-info);
+  background: hsl(215, 24%, 10%);
+}
+
+.select-input:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.select-binary {
+  height: 31px;
+  font-size: 0.78rem;
+  min-width: 190px;
+  max-width: 310px;
+  cursor: pointer;
 }
 
 .timeline-box {

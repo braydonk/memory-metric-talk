@@ -29,6 +29,7 @@ const (
 type Stat struct {
 	AnonBytes              uint64
 	FileBytes              uint64
+	FileMappedBytes        uint64
 	KernelBytes            uint64
 	ActiveFileBytes        uint64
 	InactiveFileBytes      uint64
@@ -536,6 +537,8 @@ func ParseStat(data []byte) (Stat, error) {
 			dst = &st.AnonBytes
 		case "file":
 			dst = &st.FileBytes
+		case "file_mapped":
+			dst = &st.FileMappedBytes
 		case "kernel":
 			dst = &st.KernelBytes
 		case "active_file":

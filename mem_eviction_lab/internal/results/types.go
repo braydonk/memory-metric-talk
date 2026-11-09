@@ -15,6 +15,8 @@ const (
 	TriggerStart            = "start"
 	TriggerReclaimEvent     = "reclaim_event"
 	TriggerReclaimDebounced = "reclaim_debounced"
+	TriggerManualReclaim    = "manual_reclaim"
+	TriggerLimitChange      = "limit_change"
 	TriggerPeriodic         = "periodic"
 	TriggerFinal            = "final"
 )
@@ -76,6 +78,7 @@ type SampleRow struct {
 	CGMemoryCurrentBytes     uint64 `json:"cg_memory_current_bytes"`
 	CGAnonBytes              uint64 `json:"cg_anon_bytes"`
 	CGFileBytes              uint64 `json:"cg_file_bytes"`
+	CGFileMappedBytes        uint64 `json:"cg_file_mapped_bytes"`
 	CGActiveFileBytes        uint64 `json:"cg_active_file_bytes"`
 	CGInactiveFileBytes      uint64 `json:"cg_inactive_file_bytes"`
 	CGKernelBytes            uint64 `json:"cg_kernel_bytes"`
@@ -122,6 +125,16 @@ func UnchargedRSSFileBytes(procRSSFileBytes, cgFileBytes uint64) uint64 {
 		return 0
 	}
 	return procRSSFileBytes - cgFileBytes
+}
+
+// UnmappedFileCacheBytes returns cgroup page-cache bytes (memory.stat[file]) that are not
+// currently mapped into any process page table (memory.stat[file] - memory.stat[file_mapped]),
+// such as prefetched kernel readahead pages.
+func UnmappedFileCacheBytes(cgFileBytes, cgFileMappedBytes uint64) uint64 {
+	if cgFileBytes <= cgFileMappedBytes {
+		return 0
+	}
+	return cgFileBytes - cgFileMappedBytes
 }
 
 // PopulateWorkingSet populates CGWorkingSetBytes and EstIsolatedWorkingSetBytes from raw cgroup and proc fields.

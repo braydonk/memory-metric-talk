@@ -217,6 +217,9 @@ func readSamplesCSV(path string) ([]SampleRow, error) {
 		} else {
 			row.EstIsolatedWorkingSetBytes = row.CGWorkingSetBytes + UnchargedRSSFileBytes(row.ProcRSSFileBytes, row.CGFileBytes)
 		}
+		if rr.has("cg_file_mapped_bytes") {
+			row.CGFileMappedBytes = rr.u64("cg_file_mapped_bytes")
+		}
 		if rr.err != nil {
 			return nil, fmt.Errorf("parse %s line %d: %w", SamplesCSVName, lineNum, rr.err)
 		}

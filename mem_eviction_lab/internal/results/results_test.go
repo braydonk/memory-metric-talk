@@ -238,8 +238,8 @@ func TestWorkingSetHelpersAndLegacyCSVBackfill(t *testing.T) {
 		if len(cols) != len(samplesCSVHeader) {
 			t.Fatalf("line %d has %d cols; want %d", i, len(cols), len(samplesCSVHeader))
 		}
-		// Strip the trailing 2 working-set columns to mimic older run_results/ CSVs.
-		lines[i] = strings.Join(cols[:len(cols)-2], ",")
+		// Strip the trailing 3 columns (working-set + file_mapped) to mimic older run_results/ CSVs.
+		lines[i] = strings.Join(cols[:len(cols)-3], ",")
 	}
 	if err := os.WriteFile(csvPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)

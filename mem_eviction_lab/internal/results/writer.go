@@ -26,7 +26,7 @@ var samplesCSVHeader = []string{
 	"cg_events_low", "cg_events_high", "cg_events_max", "cg_events_oom", "cg_events_oom_kill",
 	"cg_psi_some_total_us", "cg_psi_full_total_us",
 	"proc_rss_bytes", "proc_rss_anon_bytes", "proc_rss_file_bytes", "proc_rss_shmem_bytes", "proc_hwm_bytes", "proc_swap_bytes",
-	"cg_working_set_bytes", "est_isolated_working_set_bytes",
+	"cg_working_set_bytes", "est_isolated_working_set_bytes", "cg_file_mapped_bytes",
 }
 
 var sectionsCSVHeader = []string{
@@ -104,7 +104,7 @@ func (w *Writer) WriteSample(r SampleRow) error {
 		u(r.CGEventsLow), u(r.CGEventsHigh), u(r.CGEventsMax), u(r.CGEventsOOM), u(r.CGEventsOOMKill),
 		u(r.CGPSISomeTotalUs), u(r.CGPSIFullTotalUs),
 		u(r.ProcRSSBytes), u(r.ProcRSSAnonBytes), u(r.ProcRSSFileBytes), u(r.ProcRSSShmemBytes), u(r.ProcHWMBytes), u(r.ProcSwapBytes),
-		u(r.CGWorkingSetBytes), u(r.EstIsolatedWorkingSetBytes),
+		u(r.CGWorkingSetBytes), u(r.EstIsolatedWorkingSetBytes), u(r.CGFileMappedBytes),
 	}
 	if err := w.samplesCSV.Write(rec); err != nil {
 		return err

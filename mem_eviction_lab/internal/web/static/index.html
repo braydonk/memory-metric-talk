@@ -28,6 +28,11 @@
       </div>
 
       <form class="launcher-controls" id="run-launch-form">
+        <div class="field-group" id="binary-select-group">
+          <label class="field-label" for="select-collector-binary">Collector Binary</label>
+          <select id="select-collector-binary" class="select-input select-binary" aria-label="Collector binary selection"></select>
+        </div>
+
         <div class="field-group">
           <label class="field-label" for="input-memory-limit">Initial memory.max</label>
           <div class="input-with-chips">
@@ -137,7 +142,7 @@
             <span class="kpi-sub" id="kpi-bin-sub">0.0% of mapped ELF</span>
           </div>
           <div class="kpi-cell">
-            <span class="kpi-label">One-Shot Clean Evicted</span>
+            <span class="kpi-label" title="One-shot cleanly evicted binary pages (0 refaults), total currently evicted binary pages (including re-evicted after refault), and reclaimed unmapped kernel readahead cache (file - file_mapped)">One-Shot Clean Evicted</span>
             <span class="kpi-value" id="kpi-clean-evict">—</span>
             <span class="kpi-sub" id="kpi-clean-sub">stayed evicted (0 refaults)</span>
           </div>

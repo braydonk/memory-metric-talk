@@ -71,6 +71,44 @@ workload:
 	if !cfgMax.ParsedMemoryLimit().Unlimited {
 		t.Fatalf("expected Unlimited=true for max override, got %+v", cfgMax.ParsedMemoryLimit())
 	}
+
+	// Test collector_binaries YAML list and LoadWithBinaryOverrides CLI override
+	binPath2 := filepath.Join(dir, "otelcol-contrib")
+	if err := os.WriteFile(binPath2, []byte("fakebin2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	multiYAML := `
+name: otlp-multi
+collector_binaries:
+  - ./otelcol
+  - ./otelcol-contrib
+collector_config: ./col.yaml
+memory_limit: "60MiB"
+`
+	multiCfgFile := filepath.Join(dir, "run-multi.yaml")
+	if err := os.WriteFile(multiCfgFile, []byte(multiYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgMulti, err := Load(multiCfgFile, "")
+	if err != nil {
+		t.Fatalf("Load multi binaries unexpected error: %v", err)
+	}
+	if len(cfgMulti.CollectorBinaries) != 2 || cfgMulti.CollectorBinaries[0] != binPath || cfgMulti.CollectorBinaries[1] != binPath2 {
+		t.Fatalf("CollectorBinaries = %v; want [%s, %s]", cfgMulti.CollectorBinaries, binPath, binPath2)
+	}
+	if cfgMulti.CollectorBinary != binPath {
+		t.Fatalf("CollectorBinary = %q; want first binary %q", cfgMulti.CollectorBinary, binPath)
+	}
+
+	// CLI override replaces YAML list
+	cfgOverride, err := LoadWithBinaryOverrides(multiCfgFile, "", "", []string{binPath2})
+	if err != nil {
+		t.Fatalf("LoadWithBinaryOverrides unexpected error: %v", err)
+	}
+	if len(cfgOverride.CollectorBinaries) != 1 || cfgOverride.CollectorBinary != binPath2 {
+		t.Fatalf("CLI override got CollectorBinary=%q, CollectorBinaries=%v; want [%s]",
+			cfgOverride.CollectorBinary, cfgOverride.CollectorBinaries, binPath2)
+	}
 }
 
 func TestLoadValidationErrors(t *testing.T) {
