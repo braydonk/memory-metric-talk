@@ -36,4 +36,24 @@ func TestParseCLIResultsDirRequirement(t *testing.T) {
 	if _, err := parseCLI([]string{"-config", "configs/run-otlp.yaml", "-web", "70000"}); err == nil {
 		t.Fatal("expected error for out-of-range -web port")
 	}
+
+	// Repeatable and comma-separated --collector-binary flags are parsed in order.
+	multiOpts, err := parseCLI([]string{
+		"-config", "configs/run-otlp.yaml",
+		"-collector-binary", "/bin/otelcol-core,/bin/otelcol-k8s",
+		"-collector-binary", "/bin/otelcol-contrib",
+		"-web", "8080",
+	})
+	if err != nil {
+		t.Fatalf("multi --collector-binary parseCLI unexpected error: %v", err)
+	}
+	wantBins := []string{"/bin/otelcol-core", "/bin/otelcol-k8s", "/bin/otelcol-contrib"}
+	if len(multiOpts.CollectorBinariesOverride) != len(wantBins) {
+		t.Fatalf("CollectorBinariesOverride = %v; want %v", multiOpts.CollectorBinariesOverride, wantBins)
+	}
+	for i, w := range wantBins {
+		if multiOpts.CollectorBinariesOverride[i] != w {
+			t.Fatalf("CollectorBinariesOverride[%d] = %q; want %q", i, multiOpts.CollectorBinariesOverride[i], w)
+		}
+	}
 }

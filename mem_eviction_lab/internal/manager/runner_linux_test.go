@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/braydonk/memory-metric-talk/mem_eviction_lab/internal/bytefmt"
 	"github.com/braydonk/memory-metric-talk/mem_eviction_lab/internal/cgroup"
 	"github.com/braydonk/memory-metric-talk/mem_eviction_lab/internal/config"
 	"github.com/braydonk/memory-metric-talk/mem_eviction_lab/internal/results"
@@ -394,4 +395,61 @@ func TestSummaryAccumulatorWorkingSet(t *testing.T) {
 			final.FinalCGActiveFileBytes, final.FinalCGInactiveFileBytes, final.FinalProcRSSBytes,
 			12*mibB, 20*mibB, 130*mibB)
 	}
+}
+
+type stubInnerController struct {
+	lastLimit   bytefmt.Limit
+	reclaimed   uint64
+	partial     bool
+	setErr      error
+	reclaimErr  error
+}
+
+func (s *stubInnerController) SetMemoryMax(limit bytefmt.Limit) error {
+	s.lastLimit = limit
+	return s.setErr
+}
+
+func (s *stubInnerController) Reclaim(_ uint64) (uint64, bool, error) {
+	return s.reclaimed, s.partial, s.reclaimErr
+}
+
+func TestLiveControllerImmediateSampleSynchronization(t *testing.T) {
+	inner := &stubInnerController{reclaimed: 16 * 1024 * 1024, partial: true}
+	trigCh := make(chan manualSampleReq, 2)
+	loopDone := make(chan struct{})
+
+	var sampledTriggers []string
+	go func() {
+		for req := range trigCh {
+			sampledTriggers = append(sampledTriggers, req.trigger)
+			close(req.done)
+		}
+	}()
+
+	lc := &liveController{
+		inner:     inner,
+		triggerCh: trigCh,
+		loopDone:  loopDone,
+	}
+
+	lim, err := bytefmt.ParseLimit("64MiB", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lc.SetMemoryMax(lim); err != nil {
+		t.Fatalf("SetMemoryMax: %v", err)
+	}
+	reclaimed, partial, err := lc.Reclaim(32 * 1024 * 1024)
+	if err != nil || !partial || reclaimed != 16*1024*1024 {
+		t.Fatalf("Reclaim = (%d, %v, %v); want (16MiB, true, nil)", reclaimed, partial, err)
+	}
+
+	if !slices.Equal(sampledTriggers, []string{results.TriggerLimitChange, results.TriggerManualReclaim}) {
+		t.Fatalf("sampledTriggers = %v; want [%s %s]", sampledTriggers, results.TriggerLimitChange, results.TriggerManualReclaim)
+	}
+
+	// Closing loopDone prevents blocking if the run loop exits concurrently with a control request.
+	close(loopDone)
+	close(trigCh)
 }

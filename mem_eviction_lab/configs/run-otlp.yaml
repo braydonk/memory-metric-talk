@@ -1,5 +1,9 @@
 name: otlp-minimal
 collector_binary: /usr/local/google/home/braydonk/Git/opentelemetry-collector-contrib/bin/otelcontribcol_linux_amd64
+# Optional: supply multiple binaries to switch between in the -web UI dropdown (or pass repeatable --collector-binary flags):
+# collector_binaries:
+#   - /usr/local/google/home/braydonk/Git/opentelemetry-collector-contrib/bin/otelcontribcol_linux_amd64
+#   - /usr/local/google/home/braydonk/Git/opentelemetry-collector/bin/otelcorecol_linux_amd64
 collector_config: ./collector-minimal-otlp.yaml
 
 # Set to "max" for unconstrained baseline, or override via --memory-limit on the CLI.

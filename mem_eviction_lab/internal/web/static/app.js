@@ -93,6 +93,7 @@
   // Application State
   const state = {
     config: null,
+    selectedBinaryPath: "",
     runId: 0,
     status: "idle", // idle, starting, running, stopping, finished
     memoryLimitRaw: "",
@@ -143,6 +144,7 @@
 
     // Arena peak tracker for smooth bar scaling
     peakArenaBytes: 0,
+    peakUnmappedFileBytes: 0,
     resyncInFlight: false,
   };
 
@@ -155,6 +157,7 @@
     metaSaveMode: document.getElementById("meta-save-mode"),
 
     launchForm: document.getElementById("run-launch-form"),
+    selectBinary: document.getElementById("select-collector-binary"),
     inputLimit: document.getElementById("input-memory-limit"),
     inputDuration: document.getElementById("input-duration"),
     inputSwap: document.getElementById("input-swap-max"),
@@ -281,6 +284,13 @@
     return calcCgroupWS(row) + calcUnchargedRSSFile(row);
   }
 
+  function calcUnmappedFileCache(row) {
+    if (!row) return 0;
+    const cf = row.cg_file_bytes || 0;
+    const cm = row.cg_file_mapped_bytes || 0;
+    return cm > 0 && cf > cm ? cf - cm : 0;
+  }
+
   // Parse human byte limit client-side to power instant OOM headroom indicator.
   function parseClientLimit(raw) {
     if (!raw) return null;
@@ -339,6 +349,7 @@
     state.checkpoints = [new Uint8Array(total)];
     state.scrubComputedIdx = -1;
     state.viewIdx = -1;
+    state.peakUnmappedFileBytes = 0;
     state.geomDirty = true;
     state.canvasDirty = true;
     state.timelineDirty = true;
@@ -359,17 +370,23 @@
         state.livePages[idx] = d & 0x0f;
       }
     }
+    const row = framePayload.row;
+    const unmappedBytes = calcUnmappedFileCache(row);
+    if (unmappedBytes > state.peakUnmappedFileBytes) {
+      state.peakUnmappedFileBytes = unmappedBytes;
+    }
+
     state.frames.push({
       seq: framePayload.seq,
       row: framePayload.row,
       deltas,
       recvPerfMs,
+      peakUnmappedFileBytes: state.peakUnmappedFileBytes,
     });
     if (state.frames.length % CHECKPOINT_STRIDE === 0) {
       state.checkpoints.push(new Uint8Array(state.livePages));
     }
 
-    const row = framePayload.row;
     const curBytes = Math.max(row.cg_memory_current_bytes || 0, calcEstIsolatedWS(row));
     if (curBytes > state.peakArenaBytes) {
       state.peakArenaBytes = curBytes;
@@ -435,14 +452,72 @@
     }
   }
 
+  function getBinaryOptions(cfg) {
+    if (cfg && Array.isArray(cfg.collector_binaries) && cfg.collector_binaries.length > 0) {
+      return cfg.collector_binaries;
+    }
+    if (cfg && cfg.collector_binary) {
+      return [
+        {
+          path: cfg.collector_binary,
+          name: basename(cfg.collector_binary),
+          size: cfg.collector_binary_size || 0,
+          elf_sections: cfg.elf_sections || [],
+          preview_layout: cfg.preview_layout || null,
+        },
+      ];
+    }
+    return [];
+  }
+
+  function findBinaryOption(binPath) {
+    const opts = getBinaryOptions(state.config);
+    if (opts.length === 0) return null;
+    if (binPath) {
+      for (let i = 0; i < opts.length; i++) {
+        if (opts[i].path === binPath) return opts[i];
+      }
+    }
+    return opts[0];
+  }
+
+  function formatBinaryLabel(opt) {
+    if (!opt) return "—";
+    const name = opt.name || basename(opt.path);
+    return opt.size ? `${name} (${fmtMiB(opt.size)})` : name;
+  }
+
+  function updateHeaderBinaryBadge(opt) {
+    dom.metaBinName.textContent = formatBinaryLabel(opt);
+    dom.metaBinName.title = opt && opt.path ? opt.path : "";
+  }
+
+  function syncBinaryDropdown(preferredPath) {
+    const opts = getBinaryOptions(state.config);
+    dom.selectBinary.innerHTML = "";
+    for (let i = 0; i < opts.length; i++) {
+      const opt = opts[i];
+      const el = document.createElement("option");
+      el.value = opt.path;
+      el.textContent = formatBinaryLabel(opt);
+      el.title = opt.path;
+      dom.selectBinary.appendChild(el);
+    }
+    const chosen = findBinaryOption(preferredPath || state.selectedBinaryPath);
+    if (chosen) {
+      state.selectedBinaryPath = chosen.path;
+      dom.selectBinary.value = chosen.path;
+      dom.selectBinary.title = chosen.path;
+    }
+    updateHeaderBinaryBadge(chosen);
+    return chosen;
+  }
+
   function applyFullState(payload) {
     const firstLoad = !state.config;
     state.config = payload.config;
 
     dom.metaCfgName.textContent = payload.config.name || "—";
-    dom.metaBinName.textContent =
-      basename(payload.config.collector_binary) +
-      (payload.config.collector_binary_size ? ` (${fmtMiB(payload.config.collector_binary_size)})` : "");
     dom.metaSaveMode.textContent = payload.config.base_results_dir
       ? payload.config.base_results_dir
       : "In-memory live only";
@@ -456,9 +531,13 @@
     }
 
     const run = payload.active_run;
+    const preferredBinPath =
+      (run && run.collector_binary) || state.selectedBinaryPath || payload.config.collector_binary;
+    const chosenBin = syncBinaryDropdown(preferredBinPath);
+
     if (!run) {
       state.status = "idle";
-      initPageStore(payload.config.preview_layout || null, true);
+      initPageStore((chosenBin && chosenBin.preview_layout) || payload.config.preview_layout || null, true);
       updateControlsUI();
       updateTelemetryUI();
       return;
@@ -492,7 +571,7 @@
     if (run.layout) {
       initPageStore(run.layout, false);
     } else {
-      initPageStore(payload.config.preview_layout || null, true);
+      initPageStore((chosenBin && chosenBin.preview_layout) || payload.config.preview_layout || null, true);
     }
 
     const rawFrames = Array.isArray(run.frames) ? run.frames : [];
@@ -540,7 +619,11 @@
       state.followLive = true;
       state.isReplaying = false;
 
-      initPageStore(state.config ? state.config.preview_layout : null, true);
+      const chosenBin = d.collector_binary ? syncBinaryDropdown(d.collector_binary) : findBinaryOption(state.selectedBinaryPath);
+      initPageStore(
+        (chosenBin && chosenBin.preview_layout) || (state.config ? state.config.preview_layout : null),
+        true
+      );
       dom.inputLiveLimit.value = d.memory_limit_raw || "";
       showToast("Evicting warm page cache & spawning Collector cgroup…", "info");
       updateControlsUI();
@@ -558,6 +641,11 @@
       initPageStore(d.layout, false);
       for (let i = 0; i < prevFrames.length; i++) {
         const f = prevFrames[i];
+        const unmappedB = calcUnmappedFileCache(f.row);
+        if (unmappedB > state.peakUnmappedFileBytes) {
+          state.peakUnmappedFileBytes = unmappedB;
+        }
+        f.peakUnmappedFileBytes = state.peakUnmappedFileBytes;
         const total = state.totalPages;
         for (let j = 0; j < f.deltas.length; j++) {
           const val = f.deltas[j];
@@ -654,6 +742,7 @@
     const canModifyLive = state.status === "running";
 
     dom.btnStart.disabled = active;
+    dom.selectBinary.disabled = active;
     dom.inputLimit.disabled = active;
     dom.inputDuration.disabled = active;
     dom.inputSwap.disabled = active;
@@ -890,7 +979,16 @@
     const everEvicted = row.bin_ever_evicted_pages || 0;
     const everRefaulted = row.bin_ever_refaulted_pages || 0;
     const cleanlyEvicted = row.bin_cleanly_evicted_pages || 0;
+    const evictedOut = row.bin_evicted_out_pages || 0;
     const everFaulted = row.bin_ever_faulted_pages || 0;
+    const cleanBytes = cleanlyEvicted * pageSize;
+    const evictedOutBytes = evictedOut * pageSize;
+    const unmappedB = calcUnmappedFileCache(row);
+    const peakUnmappedB =
+      frame && frame.peakUnmappedFileBytes !== undefined
+        ? frame.peakUnmappedFileBytes
+        : state.peakUnmappedFileBytes;
+    const unmappedEvictedB = Math.max(0, peakUnmappedB - unmappedB);
 
     dom.kpiCgCur.textContent = fmtMiB(curB);
     dom.kpiCgSub.textContent = `Anon+Kern ${fmtMiB(anonB + kernB)} · limit ${lim.unlimited ? "max" : lim.human}`;
@@ -906,10 +1004,23 @@
     dom.kpiBinRes.textContent = fmtMiB(binResPages * pageSize);
     dom.kpiBinSub.textContent = `${((binResPages / binTotal) * 100).toFixed(1)}% of ELF · CoW ${fmtMiB((row.bin_present_cow_pages || 0) * pageSize)}`;
 
-    dom.kpiCleanEvict.textContent = fmtMiB(cleanlyEvicted * pageSize);
-    dom.kpiCleanSub.textContent = everFaulted > 0
-      ? `${((cleanlyEvicted / everFaulted) * 100).toFixed(1)}% of faulted stayed clean`
-      : "0 pages faulted yet";
+    if (evictedOut > cleanlyEvicted) {
+      dom.kpiCleanEvict.textContent = `${fmtMiB(cleanBytes)} | Out ${fmtMiB(evictedOutBytes)}`;
+    } else if (cleanlyEvicted === 0 && unmappedEvictedB >= 64 * 1024) {
+      dom.kpiCleanEvict.textContent = `0.0 MiB (+${fmtMiB(unmappedEvictedB)} unmapped)`;
+    } else {
+      dom.kpiCleanEvict.textContent = fmtMiB(cleanBytes);
+    }
+    let cleanSub =
+      everFaulted > 0
+        ? `${((cleanlyEvicted / everFaulted) * 100).toFixed(1)}% of faulted stayed clean`
+        : "0 pages faulted yet";
+    if (unmappedEvictedB >= 64 * 1024) {
+      cleanSub += ` · −${fmtMiB(unmappedEvictedB)} unmapped cache`;
+    } else if (unmappedB >= 1024 * 1024) {
+      cleanSub += ` · ${fmtMiB(unmappedB)} unmapped cache`;
+    }
+    dom.kpiCleanSub.textContent = cleanSub;
 
     if (everEvicted > 0) {
       const refPct = (everRefaulted / everEvicted) * 100;
@@ -936,7 +1047,10 @@
     dom.cntResFile.textContent = fmtInt(row.bin_present_file_pages);
     dom.cntResCow.textContent = fmtInt(row.bin_present_cow_pages);
     dom.cntFlashEvict.textContent = fmtInt(row.delta_evictions);
-    dom.cntEvictClean.textContent = fmtInt(cleanlyEvicted);
+    dom.cntEvictClean.textContent =
+      evictedOut > cleanlyEvicted
+        ? `${fmtInt(cleanlyEvicted)} (${fmtInt(evictedOut)} out)`
+        : fmtInt(cleanlyEvicted);
     const refOncePages = Math.max(0, everRefaulted - (row.bin_thrashing_pages || 0));
     dom.cntRefault1.textContent = fmtInt(refOncePages);
     dom.cntThrash.textContent = fmtInt(row.bin_thrashing_pages);
@@ -1694,12 +1808,33 @@
     dom.inputLimit.addEventListener("input", syncChipHighlights);
     dom.inputDuration.addEventListener("input", syncChipHighlights);
 
+    dom.selectBinary.addEventListener("change", () => {
+      if (isRunActive()) return;
+      state.selectedBinaryPath = dom.selectBinary.value;
+      dom.selectBinary.title = state.selectedBinaryPath;
+      const chosen = findBinaryOption(state.selectedBinaryPath);
+      updateHeaderBinaryBadge(chosen);
+      state.status = "idle";
+      state.markers = [];
+      state.finalMeta = null;
+      state.sections = [];
+      state.collectorLogTail = "";
+      state.runError = "";
+      state.peakArenaBytes = 0;
+      initPageStore((chosen && chosen.preview_layout) || (state.config ? state.config.preview_layout : null), true);
+      showToast(`Selected binary: ${formatBinaryLabel(chosen)}`, "info");
+      updateControlsUI();
+      updateTelemetryUI();
+      updateDiagnosticsUI();
+    });
+
     dom.launchForm.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       if (isRunActive()) return;
       dom.btnStart.disabled = true;
       try {
         await postJSON("/api/run/start", {
+          collector_binary: dom.selectBinary.value,
           memory_limit: dom.inputLimit.value.trim(),
           duration: dom.inputDuration.value.trim(),
           swap_max: dom.inputSwap.value.trim(),

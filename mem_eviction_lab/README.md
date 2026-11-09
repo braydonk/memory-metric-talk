@@ -91,10 +91,17 @@ sudo ./bin/manager \
   --config configs/run-otlp.yaml \
   --results-dir results/web-runs \
   -web 8080
+# Or supply multiple Collector binaries via --collector-binary (or collector_binaries in YAML) to switch between in the web dropdown:
+sudo ./bin/manager \
+  --config configs/run-otlp.yaml \
+  --collector-binary /path/to/otelcol-core \
+  --collector-binary /path/to/otelcol-contrib \
+  --results-dir results/web-runs \
+  -web 8080
 ```
 
 Open `http://127.0.0.1:8080` in your browser to:
-- **Launch back-to-back runs** with editable `memory.max`, `duration`, and `swap.max` presets without restarting `manager`.
+- **Launch back-to-back runs** with a **Collector Binary** selector dropdown (`<basename> (<size MiB>)`, updating the idle ELF layout preview immediately when switched) alongside editable `memory.max`, `duration`, and `swap.max` presets without restarting `manager`.
 - **Watch every 4 KiB binary page in real time** (100ms steady-state / 50ms reclaim-burst cadence) across adaptive ELF section bands (`.text`, `.rodata`, `.gopclntab`, `.noptrdata`, `.data`), flashing cyan on cold faults, gold on CoW dirtying, mint/jade on clean eviction, and tangerine/vermilion on refault thrashing—paired with a live cgroup `memory.max` arena bar (`anon` + `kernel` + `file`).
 - **Squeeze memory mid-run**: dynamically change `memory.max` (with a live OOM-risk check against `anon + kernel`) or trigger one-shot proactive kernel reclaim via `memory.reclaim` (Linux 5.19+).
 - **Scrub & replay in slow motion**: pause or scrub frame history and replay the ~3.5s Go `init()` startup fault cascade at `0.1×` speed, or toggle between **4 KiB Pages (1:1)** and **256 KiB Blocks** with hover inspection.
@@ -130,7 +137,11 @@ To create a custom experiment, prepare:
 name: my-experiment
 
 # Local filesystem paths only (required). Relative paths resolve from this YAML file's directory.
+# Use collector_binary for a single binary, or collector_binaries to list multiple binaries selectable in -web mode.
 collector_binary: /path/to/otelcol-contrib
+# collector_binaries:
+#   - /path/to/otelcol-core
+#   - /path/to/otelcol-contrib
 collector_config: ./my-collector-config.yaml
 
 # Optional extra CLI flags appended after --config=<collector_config>.
@@ -213,6 +224,7 @@ workload:
 | Flag | Default | Description |
 |---|---|---|
 | `--config` | *(required)* | Path to run YAML configuration file |
+| `--collector-binary` | *(from YAML)* | Optional Collector binary path(s) overriding `collector_binary`/`collector_binaries` in YAML (repeatable or comma-separated) |
 | `--results-dir` | *(required unless `-web`)* | Output directory for run artifacts (optional only in `-web` mode, where each run creates a timestamped subdirectory if set) |
 | `-web` | `0` *(disabled)* | Start interactive localhost web UI on `127.0.0.1:<port>` (`1..65535`) instead of running headlessly |
 | `--duration` | `60s` | Observation window (starts *after* readiness when `workload.enabled` is true) |

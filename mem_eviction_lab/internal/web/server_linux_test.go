@@ -31,6 +31,7 @@ type fakeLiveController struct {
 	mu             sync.Mutex
 	lastLimit      bytefmt.Limit
 	reclaimTargets []uint64
+	onReclaim      func()
 }
 
 func (f *fakeLiveController) SetMemoryMax(lim bytefmt.Limit) error {
@@ -42,16 +43,32 @@ func (f *fakeLiveController) SetMemoryMax(lim bytefmt.Limit) error {
 
 func (f *fakeLiveController) Reclaim(bytes uint64) (uint64, bool, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.reclaimTargets = append(f.reclaimTargets, bytes)
+	cb := f.onReclaim
+	f.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
 	return bytes / 2, true, nil
 }
 
-func writeTestConfig(t *testing.T, dir string) string {
+func writeTestConfig(t *testing.T, dir string) (cfgPath, bin1, bin2 string) {
 	t.Helper()
 	selfExe, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
+	}
+	rawExe, err := os.ReadFile(selfExe)
+	if err != nil {
+		t.Fatalf("read selfExe: %v", err)
+	}
+	bin1 = filepath.Join(dir, "otelcol-core")
+	bin2 = filepath.Join(dir, "otelcol-contrib")
+	if err := os.WriteFile(bin1, rawExe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin2, rawExe, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	colCfg := filepath.Join(dir, "collector.yaml")
 	if err := os.WriteFile(colCfg, []byte("service: {}\n"), 0o644); err != nil {
@@ -59,30 +76,41 @@ func writeTestConfig(t *testing.T, dir string) string {
 	}
 	runCfg := filepath.Join(dir, "run.yaml")
 	yamlBody := fmt.Sprintf(`name: web-unit-test
-collector_binary: %q
+collector_binaries:
+  - %q
+  - %q
 collector_config: %q
 memory_limit: 80MiB
 swap_max: "0"
-`, selfExe, colCfg)
+`, bin1, bin2, colCfg)
 	if err := os.WriteFile(runCfg, []byte(yamlBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return runCfg
+	return runCfg, bin1, bin2
 }
 
 func TestWebServerLifecycleSSEAndLiveControls(t *testing.T) {
 	tmp := t.TempDir()
-	cfgPath := writeTestConfig(t, tmp)
+	cfgPath, bin1, bin2 := writeTestConfig(t, tmp)
 	resBase := filepath.Join(tmp, "saved-runs")
 
 	ctrl := &fakeLiveController{}
 	runningReady := make(chan struct{})
 	var runningOnce sync.Once
+	var (
+		muLastBin sync.Mutex
+		lastBin   string
+	)
 
 	runFn := func(ctx context.Context, opts manager.Options, _ *log.Logger) error {
 		if !opts.WebMode {
 			return fmt.Errorf("expected WebMode=true")
 		}
+		muLastBin.Lock()
+		if len(opts.CollectorBinariesOverride) > 0 {
+			lastBin = opts.CollectorBinariesOverride[0]
+		}
+		muLastBin.Unlock()
 		if opts.Hooks.OnCgroupReady != nil {
 			opts.Hooks.OnCgroupReady(ctrl)
 		}
@@ -119,8 +147,32 @@ func TestWebServerLifecycleSSEAndLiveControls(t *testing.T) {
 				CGMemoryCurrentBytes: 52 * 1024 * 1024,
 				CGAnonBytes:          30 * 1024 * 1024,
 				CGFileBytes:          20 * 1024 * 1024,
+				CGFileMappedBytes:    12 * 1024 * 1024, // 8 MiB unmapped readahead cache
 				CGKernelBytes:        2 * 1024 * 1024,
 			}, deltas)
+			ctrl.mu.Lock()
+			ctrl.onReclaim = func() {
+				opts.Hooks.OnSample(results.SampleRow{
+					ElapsedMs:              250,
+					Trigger:                results.TriggerManualReclaim,
+					BinTotalPages:          100,
+					BinPresentFilePages:    0,
+					BinPresentCoWPages:     1,
+					BinEvictedOutPages:     1,
+					BinCleanlyEvictedPages: 1,
+					BinEverFaultedPages:    2,
+					BinEverEvictedPages:    1,
+					DeltaEvictions:         1024, // 4 MiB mapped binary PTEs evicted
+					CumColdFaults:          2,
+					CumEvictions:           1024,
+					CGMemoryCurrentBytes:   42 * 1024 * 1024,
+					CGAnonBytes:            30 * 1024 * 1024,
+					CGFileBytes:            10 * 1024 * 1024,
+					CGFileMappedBytes:      8 * 1024 * 1024, // 2 MiB unmapped cache remaining (6 MiB unmapped reclaimed)
+					CGKernelBytes:          2 * 1024 * 1024,
+				}, nil)
+			}
+			ctrl.mu.Unlock()
 		}
 		runningOnce.Do(func() { close(runningReady) })
 
@@ -193,6 +245,11 @@ func TestWebServerLifecycleSSEAndLiveControls(t *testing.T) {
 	stRes.Body.Close()
 	if initState.Config.PreviewLayout == nil || initState.Config.PreviewLayout.TotalBinaryPages == 0 {
 		t.Fatalf("expected non-empty PreviewLayout in initial /api/state: %+v", initState.Config)
+	}
+	if len(initState.Config.CollectorBinaries) != 2 ||
+		initState.Config.CollectorBinaries[0].Path != bin1 ||
+		initState.Config.CollectorBinaries[1].Path != bin2 {
+		t.Fatalf("expected 2 CollectorBinaries [%s, %s], got: %+v", bin1, bin2, initState.Config.CollectorBinaries)
 	}
 
 	// 3. Origin & Content-Type guards on mutating endpoints.
@@ -295,6 +352,9 @@ func TestWebServerLifecycleSSEAndLiveControls(t *testing.T) {
 	if recRes.StatusCode != http.StatusOK {
 		t.Fatalf("reclaim status = %d (%s); want 200", recRes.StatusCode, recBody)
 	}
+	if !bytes.Contains(recBody, []byte("4.0 MiB mapped binary PTEs, 6.0 MiB unmapped readahead cache")) {
+		t.Fatalf("expected reclaim response to detail mapped PTE and unmapped cache breakdown, got: %s", recBody)
+	}
 	ctrl.mu.Lock()
 	targets := append([]uint64(nil), ctrl.reclaimTargets...)
 	ctrl.mu.Unlock()
@@ -372,11 +432,38 @@ collectSSE:
 		t.Fatalf("ResultsSubdir = %q; want prefix %q", postState.ActiveRun.ResultsSubdir, resBase)
 	}
 
-	// 9. Verify starting a consecutive run works immediately without restarting server.
-	startRes2, startBody2 := postJSON("/api/run/start", `{"memory_limit":"max","duration":"10s"}`)
+	// 9. Verify starting a consecutive run with the second binary works and rejects unknown binaries.
+	badBinRes, _ := postJSON("/api/run/start", `{"collector_binary":"/nonexistent/binary","memory_limit":"max","duration":"10s"}`)
+	if badBinRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown collector_binary status = %d; want 400", badBinRes.StatusCode)
+	}
+
+	startRes2, startBody2 := postJSON("/api/run/start", fmt.Sprintf(`{"collector_binary":%q,"memory_limit":"max","duration":"10s"}`, bin2))
 	if startRes2.StatusCode != http.StatusAccepted {
 		t.Fatalf("second run start status = %d (%s); want 202", startRes2.StatusCode, startBody2)
 	}
 	_, _ = postJSON("/api/run/stop", `{}`)
 	srv.WaitActiveRun()
+
+	muLastBin.Lock()
+	gotLastBin := lastBin
+	muLastBin.Unlock()
+	if gotLastBin != bin2 {
+		t.Fatalf("second run used binary %q; want %q", gotLastBin, bin2)
+	}
+	stRes3, err := http.Get(ts.URL + "/api/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var postState2 StateResponse
+	if err := json.NewDecoder(stRes3.Body).Decode(&postState2); err != nil {
+		t.Fatal(err)
+	}
+	stRes3.Body.Close()
+	if postState2.ActiveRun == nil || postState2.ActiveRun.CollectorBinary != bin2 {
+		t.Fatalf("ActiveRun.CollectorBinary = %v; want %q", postState2.ActiveRun, bin2)
+	}
+	if !strings.Contains(filepath.Base(postState2.ActiveRun.ResultsSubdir), "otelcol-contrib") {
+		t.Fatalf("ResultsSubdir %q did not include selected binary name otelcol-contrib", postState2.ActiveRun.ResultsSubdir)
+	}
 }

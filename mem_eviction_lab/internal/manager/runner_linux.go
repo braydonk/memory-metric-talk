@@ -56,6 +56,53 @@ type LiveController interface {
 	Reclaim(bytes uint64) (reclaimed uint64, partial bool, err error)
 }
 
+type manualSampleReq struct {
+	trigger string
+	done    chan struct{}
+}
+
+type liveController struct {
+	inner     LiveController
+	triggerCh chan<- manualSampleReq
+	loopDone  <-chan struct{}
+}
+
+func (c *liveController) SetMemoryMax(limit bytefmt.Limit) error {
+	if err := c.inner.SetMemoryMax(limit); err != nil {
+		return err
+	}
+	c.requestSample(results.TriggerLimitChange)
+	return nil
+}
+
+func (c *liveController) Reclaim(bytes uint64) (reclaimed uint64, partial bool, err error) {
+	reclaimed, partial, err = c.inner.Reclaim(bytes)
+	if err != nil {
+		return reclaimed, partial, err
+	}
+	c.requestSample(results.TriggerManualReclaim)
+	return reclaimed, partial, nil
+}
+
+func (c *liveController) requestSample(trigger string) {
+	if c.triggerCh == nil {
+		return
+	}
+	req := manualSampleReq{
+		trigger: trigger,
+		done:    make(chan struct{}),
+	}
+	select {
+	case c.triggerCh <- req:
+	case <-c.loopDone:
+		return
+	}
+	select {
+	case <-req.done:
+	case <-c.loopDone:
+	}
+}
+
 // Hooks receives real-time streaming callbacks during manager.Run (used by -web mode).
 type Hooks struct {
 	OnCgroupReady func(ctrl LiveController)
@@ -67,17 +114,18 @@ type Hooks struct {
 
 // Options holds CLI flags and runtime options passed to manager.Run.
 type Options struct {
-	ConfigPath          string
-	Duration            time.Duration
-	ResultsDir          string
-	MemoryLimitOverride string
-	SwapMaxOverride     string
-	AllowWarmCache      bool
-	CgroupRoot          string
-	WebPort             int
-	WebMode             bool
-	StopCh              <-chan struct{}
-	Hooks               *Hooks
+	ConfigPath                string
+	CollectorBinariesOverride []string
+	Duration                  time.Duration
+	ResultsDir                string
+	MemoryLimitOverride       string
+	SwapMaxOverride           string
+	AllowWarmCache            bool
+	CgroupRoot                string
+	WebPort                   int
+	WebMode                   bool
+	StopCh                    <-chan struct{}
+	Hooks                     *Hooks
 }
 
 func validateOptions(opts Options) error {
@@ -112,7 +160,7 @@ func Run(ctx context.Context, opts Options, logger *log.Logger) (retErr error) {
 		return errors.New("manager must be run as root (e.g. via sudo) to create cgroups and read /proc/[pid]/pagemap PFNs")
 	}
 
-	cfg, err := config.LoadWithOverrides(opts.ConfigPath, opts.MemoryLimitOverride, opts.SwapMaxOverride)
+	cfg, err := config.LoadWithBinaryOverrides(opts.ConfigPath, opts.MemoryLimitOverride, opts.SwapMaxOverride, opts.CollectorBinariesOverride)
 	if err != nil {
 		return err
 	}
@@ -186,8 +234,19 @@ func Run(ctx context.Context, opts Options, logger *log.Logger) (retErr error) {
 	}()
 	logger.Printf("created cgroup %s (memory.max=%s, memory.swap.max=%s)",
 		cg.Path(), cfg.ParsedMemoryLimit().Human(), cfg.ParsedSwapMax().String())
+	manualSampleCh := make(chan manualSampleReq, 8)
+	loopDone := make(chan struct{})
+	var loopDoneOnce sync.Once
+	closeLoopDone := func() {
+		loopDoneOnce.Do(func() { close(loopDone) })
+	}
+	defer closeLoopDone()
 	if opts.Hooks != nil && opts.Hooks.OnCgroupReady != nil {
-		opts.Hooks.OnCgroupReady(cg)
+		opts.Hooks.OnCgroupReady(&liveController{
+			inner:     cg,
+			triggerCh: manualSampleCh,
+			loopDone:  loopDone,
+		})
 	}
 
 	eventCh, err := cg.StartWatcher()
@@ -335,7 +394,7 @@ func Run(ctx context.Context, opts Options, logger *log.Logger) (retErr error) {
 			row.ProcSwapBytes = pst.VmSwapBytes
 		}
 		row.PopulateWorkingSet()
-		if trig == results.TriggerReclaimEvent || trig == results.TriggerReclaimDebounced {
+		if trig == results.TriggerReclaimEvent || trig == results.TriggerReclaimDebounced || trig == results.TriggerManualReclaim {
 			reclaimEventSamples++
 		}
 		summaryAcc.observe(row, pageSize)
@@ -359,6 +418,7 @@ func Run(ctx context.Context, opts Options, logger *log.Logger) (retErr error) {
 	)
 
 	if mapsErr != nil {
+		closeLoopDone()
 		// Check whether the child already died (e.g. instant OOM during startup).
 		select {
 		case <-exitedCh:
@@ -479,10 +539,15 @@ func Run(ctx context.Context, opts Options, logger *log.Logger) (retErr error) {
 				lastEventSample = time.Now()
 				takeSample(results.TriggerReclaimDebounced)
 
+			case req := <-manualSampleCh:
+				takeSample(req.trigger)
+				close(req.done)
+
 			case <-ticker.C:
 				takeSample(results.TriggerPeriodic)
 			}
 		}
+		closeLoopDone()
 	}
 
 	if gen != nil {
@@ -625,6 +690,7 @@ func fillCgroupFields(row *results.SampleRow, snap cgroup.Snapshot) {
 	row.CGMemoryCurrentBytes = snap.CurrentBytes
 	row.CGAnonBytes = snap.Stat.AnonBytes
 	row.CGFileBytes = snap.Stat.FileBytes
+	row.CGFileMappedBytes = snap.Stat.FileMappedBytes
 	row.CGActiveFileBytes = snap.Stat.ActiveFileBytes
 	row.CGInactiveFileBytes = snap.Stat.InactiveFileBytes
 	row.CGKernelBytes = snap.Stat.KernelBytes

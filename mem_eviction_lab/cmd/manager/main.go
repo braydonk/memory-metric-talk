@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,10 +19,28 @@ import (
 	"github.com/braydonk/memory-metric-talk/mem_eviction_lab/internal/web"
 )
 
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceFlag) Set(val string) error {
+	for _, part := range strings.Split(val, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			*s = append(*s, trimmed)
+		}
+	}
+	return nil
+}
+
 func parseCLI(args []string) (manager.Options, error) {
 	var opts manager.Options
+	var binOverrides stringSliceFlag
 	fs := flag.NewFlagSet("manager", flag.ContinueOnError)
 	fs.StringVar(&opts.ConfigPath, "config", "", "Path to lab run YAML configuration file (required)")
+	fs.Var(&binOverrides, "collector-binary", "Optional Collector binary path(s) overriding collector_binary/collector_binaries in YAML (repeatable or comma-separated)")
 	fs.DurationVar(&opts.Duration, "duration", 60*time.Second, "Active observation / workload duration")
 	fs.StringVar(&opts.ResultsDir, "results-dir", "", "Output directory for CSV, JSON, and log artifacts (required unless -web is set)")
 	fs.StringVar(&opts.MemoryLimitOverride, "memory-limit", "", "Optional override for memory_limit in YAML (e.g. \"max\", \"60MiB\")")
@@ -32,6 +51,7 @@ func parseCLI(args []string) (manager.Options, error) {
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
+	opts.CollectorBinariesOverride = []string(binOverrides)
 	if opts.ConfigPath == "" {
 		fs.Usage()
 		return opts, errors.New("--config is required")
