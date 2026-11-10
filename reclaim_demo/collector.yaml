@@ -1,0 +1,27 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: ${env:OTLP_HTTP_ENDPOINT}
+
+processors:
+  batch:
+    timeout: 200ms
+    send_batch_size: 512
+
+exporters:
+  nop:
+
+service:
+  telemetry:
+    metrics:
+      # Off by default: otherwise every instance would try to serve Prometheus metrics on
+      # :8888. The manager turns them on when telemetry_endpoint is set in demo.yaml.
+      # nop doesn't report exporter metrics, and debug would add log I/O that skews the
+      # memory numbers.
+      level: none
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [nop]
