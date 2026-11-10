@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reclaim-demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: reclaim-demo
+  template:
+    metadata:
+      labels:
+        app: reclaim-demo
+    spec:
+      # Gives the collectors time to stop and the manager time to remove its cgroups.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: manager
+          image: reclaim-demo
+          # Needs root + privileged to create cgroups, write memory.reclaim and use
+          # CLONE_INTO_CGROUP.
+          securityContext:
+            privileged: true
+          volumeMounts:
+            # The per-instance binary copies must be on a disk-backed filesystem, not
+            # tmpfs, or their pages can't be reclaimed without swap.
+            - name: work
+              mountPath: /var/tmp/reclaim_demo
+      volumes:
+        - name: work
+          emptyDir: {}

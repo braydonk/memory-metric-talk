@@ -1,0 +1,10 @@
+# Runs reclaim_demo in the current kind cluster:
+#
+#   kind create cluster
+#   tilt up
+
+docker_build('reclaim-demo', '.', ignore=['deploy', 'Tiltfile', 'README.md'])
+
+k8s_yaml('deploy/k8s.yaml')
+
+k8s_resource('reclaim-demo')

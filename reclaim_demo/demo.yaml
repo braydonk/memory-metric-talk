@@ -1,0 +1,88 @@
+# reclaim_demo configuration. Every instance runs the same collector, config and load;
+# only memory_max and the reclaim policy differ, so differences in the graphs come from
+# reclaim alone.
+
+# Collector binary to run. Each instance gets its own copy in work_dir, so instances
+# don't share (and steal) each other's page cache.
+collector_binary: /usr/local/bin/otelcol-contrib
+
+# Collector configuration shared by all instances (OTLP/HTTP in, nop out).
+collector_config: ./collector.yaml
+
+# Where the per-instance binary copies and collector.log files go. Must be disk-backed
+# (not tmpfs), otherwise the binary pages are shmem and can't be reclaimed without swap.
+# On exit only <work_dir>/<name> is removed, and work_dir itself only if we created it.
+work_dir: /var/tmp/reclaim_demo
+
+# cgroup v2 mount point. Instances live in <cgroup_root>/reclaim_demo/<name>.
+cgroup_root: /sys/fs/cgroup
+
+# OTLP/HTTP port of the first instance; the next instances use base_port+1, +2, ...
+base_port: 4318
+
+# Optional: OTLP/HTTP metrics URL the collectors push their own telemetry to (throughput,
+# heap, ...), tagged with k8s.container.name=<instance name>. Unset by default, which
+# turns collector telemetry off. In kind, the otel-memory DaemonSet receives it:
+# telemetry_endpoint: http://otel-memory.otel.svc.cluster.local:4318/v1/metrics
+
+# Synthetic load, the same for every instance: one OTLP/HTTP export request with
+# data_points gauge points every interval. interval: 0 disables it.
+load:
+  interval: 100ms
+  data_points: 10000
+
+# Each instance has:
+#   name:       cgroup and log name; unique, no '/' or spaces.
+#   memory_max: written to memory.max: "max" or a size (bytes, KiB, MiB, GiB).
+#   reclaim:    proactive reclaim policy, applied every interval through memory.reclaim:
+#     type: none   no proactive reclaim (the kernel still reclaims at memory_max).
+#     type: psi    Senpai-style (Meta TMO): reclaim
+#                  memory.current * ratio * max(0, 1 - pressure/pressure_target)
+#                  where pressure is the share of the interval tasks stalled on memory.
+#     type: fixed  reclaim step bytes, whatever the pressure.
+instances:
+  # Baseline: nothing reclaims, usage stays at "binary + startup cruft".
+  - name: otelcol-control
+    memory_max: 512MiB
+    reclaim:
+      type: none
+
+  # Senpai-style: reclaim up to 1% of memory.current every 2s, backing off as memory
+  # pressure ("some") approaches 0.1%.
+  - name: otelcol-soft-reclaim
+    memory_max: 512MiB
+    reclaim:
+      type: psi
+      interval: 2s
+      ratio: 0.01
+      pressure_target: 0.001
+
+  # Too aggressive: 32MiB every 2s regardless of pressure. Expect refaults and PSI spikes.
+  - name: otelcol-aggressive-reclaim
+    memory_max: 512MiB
+    reclaim:
+      type: fixed
+      interval: 2s
+      step: 32MiB
+
+  # With this load the heap (anon + kernel) settles at ~72MiB, which can't be
+  # reclaimed without swap. The two limits below are set around that floor.
+
+  # Above the floor: no proactive reclaim, the kernel reclaims the binary's pages on
+  # its own at the limit. Thrashing (refaults), but no OOM.
+  - name: otelcol-limited
+    memory_max: 92MiB
+    reclaim:
+      type: none
+
+  # Below the floor: the heap outgrows the limit, reclaim can't free anon, and the cgroup
+  # OOM killer fires. The manager restarts the collector after 3s, so oom_kill keeps
+  # climbing.
+  #
+  # A limit below the collector's code footprint at startup does NOT OOM: the kernel
+  # keeps evicting code pages the collector needs again (thrashing livelock) and never
+  # declares an OOM while there's a page it can evict.
+  - name: otelcol-oom
+    memory_max: 48MiB
+    reclaim:
+      type: none
