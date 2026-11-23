@@ -1,0 +1,262 @@
+type: cgroup
+
+status:
+  class: receiver
+  stability:
+    development: [metrics]
+  distributions: []
+  codeowners:
+    active: [rogercoll]
+
+sem_conv_version: 1.43.0
+
+# One resource per scraped cgroup v2 directory (Linux only), for the cgroups the kubelet
+# reports on: the root cgroup (node), pod cgroups and container cgroups. Other cgroups
+# (system.slice, kubepods.slice, QoS slices, ...) are skipped. Only values the
+# kubeletstats receiver doesn't already report are emitted, under the same metric
+# namespaces, so they can be compared with k8s.*.memory.{usage,working_set,rss}.
+# Cgroups matching `extra_cgroups` (unknown to the kubelet, e.g. created by a benchmark
+# harness) are reported as containers with the full container.memory.* set.
+resource_attributes:
+  cgroup.path:
+    description: Path of the cgroup relative to the cgroup v2 mount point, e.g. `/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod<uid>.slice`. `/` is the root cgroup.
+    enabled: true
+    type: string
+  container.id:
+    description: Container ID, parsed from the cgroup path when it is a container scope (e.g. `cri-containerd-<id>.scope`).
+    enabled: true
+    type: string
+  k8s.pod.uid:
+    description: The UID of the Pod, parsed from the cgroup path when it belongs to the kubepods hierarchy.
+    enabled: true
+    type: string
+
+attributes:
+  memory_backing_type:
+    name_override: type
+    description: Whether the pages are anonymous (heap, stacks) or file-backed (page cache, mapped binaries).
+    type: string
+    requirement_level: required
+    enum: [anon, file]
+  memory_event_type:
+    name_override: type
+    description: "Event counted in `memory.events`: `high`/`max` limit hits, `oom` (OOM killer invoked) and `oom_kill` (processes killed)."
+    type: string
+    requirement_level: required
+    enum: [high, max, oom, oom_kill]
+  memory_limit_type:
+    name_override: type
+    description: Which cgroup memory limit file the value comes from.
+    type: string
+    requirement_level: required
+    enum: [high, max, swap.max]
+  pressure_stall_type:
+    name_override: type
+    description: "`some`: at least one task was stalled on memory. `full`: all non-idle tasks were stalled at the same time."
+    type: string
+    requirement_level: required
+    enum: [some, full]
+  reclaim_source:
+    name_override: source
+    description: "Who reclaimed the pages: `kswapd` (background), `direct` (the allocating task, e.g. at `memory.max`), `proactive` (`memory.reclaim` writes) or `khugepaged`."
+    type: string
+    requirement_level: required
+    enum: [kswapd, direct, proactive, khugepaged]
+
+metrics:
+  container.memory.events:
+    enabled: true
+    description: Memory events of the container cgroup and its descendants, from `memory.events`.
+    extended_documentation: >-
+      `max` counts how often usage hit `memory.max` (each one starts reclaim), `oom`
+      how often the OOM killer was invoked and `oom_kill` how many processes it killed.
+    unit: "{event}"
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: true
+    attributes: [memory_event_type]
+
+  container.memory.file:
+    enabled: true
+    description: Page cache charged to the container cgroup, from `memory.stat` `file`.
+    extended_documentation: >-
+      Includes the mapped binary and libraries, unmapped file cache and shmem/tmpfs.
+      Clean file pages can be reclaimed. Together with `container.memory.rss` (anon) and
+      `container.memory.kernel` it adds up to approximately `container.memory.usage`.
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+
+  container.memory.file.mapped:
+    enabled: true
+    description: Page cache mapped into process address spaces, from `memory.stat` `file_mapped`.
+    extended_documentation: >-
+      The part of `container.memory.file` processes have mapped, such as executable
+      binaries. The rest is unmapped cache, which is not part of any process RSS.
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+
+  container.memory.kernel:
+    enabled: true
+    description: Kernel memory charged to the container cgroup (slab, stacks, page tables, sockets), from `memory.stat` `kernel`.
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+
+  container.memory.limit:
+    enabled: true
+    description: Memory limits of the container cgroup, from `memory.high`, `memory.max` and `memory.swap.max`.
+    extended_documentation: >-
+      No data point is reported for a limit set to `max` (unlimited). When usage reaches
+      `memory.max` the kernel reclaims inside the cgroup and, if that fails, OOM kills
+      the container.
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+    attributes: [memory_limit_type]
+
+  container.memory.pressure.stall_time:
+    enabled: true
+    description: Time tasks in the container were stalled waiting on memory (reclaim, refault I/O), from the container cgroup's `memory.pressure` `total=`.
+    extended_documentation: >-
+      Pressure stall information (PSI). `full` close to 0 means reclaim was invisible
+      to the workload; a steadily rising `full` means the workload is losing wall-clock
+      time to memory pressure.
+    unit: s
+    stability: development
+    sum:
+      value_type: double
+      aggregation_temporality: cumulative
+      monotonic: true
+    attributes: [pressure_stall_type]
+
+  container.memory.reclaimed:
+    enabled: true
+    description: Pages reclaimed from the container cgroup, by who reclaimed them, from `memory.stat` `pgsteal_*`.
+    unit: "{page}"
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: true
+    attributes: [reclaim_source]
+
+  container.memory.rss:
+    enabled: true
+    description: Anonymous memory of the cgroup, from `memory.stat` `anon`. Only reported for `extra_cgroups`.
+    extended_documentation: >-
+      Same value the kubelet reports as container rss. Kubernetes containers are not
+      reported here, use the kubeletstats receiver for them.
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+
+  container.memory.usage:
+    enabled: true
+    description: Total memory charged to the cgroup, from `memory.current`. Only reported for `extra_cgroups`.
+    extended_documentation: >-
+      Same value the kubelet reports as container usage. Kubernetes containers are not
+      reported here, use the kubeletstats receiver for them.
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+
+  container.memory.working_set:
+    enabled: true
+    description: "`memory.current` minus `memory.stat` `inactive_file`, floored at 0. Only reported for `extra_cgroups`."
+    extended_documentation: >-
+      Same formula cAdvisor uses for the kubelet container working set. Kubernetes
+      containers are not reported here, use the kubeletstats receiver for them.
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+
+  container.memory.workingset.refaults:
+    enabled: true
+    description: Reclaimed pages that were faulted back in while the kernel still remembered them, from `memory.stat` `workingset_refault_*`.
+    extended_documentation: >-
+      A rising file refault rate means reclaim is evicting pages that are still in use
+      (thrashing).
+    unit: "{page}"
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: true
+    attributes: [memory_backing_type]
+
+  k8s.node.memory.limit:
+    enabled: true
+    description: Memory limits of the node's root cgroup, from `memory.high`, `memory.max` and `memory.swap.max`.
+    extended_documentation: >-
+      The real root cgroup has no limit files, so this is only reported when the root is
+      a namespaced cgroup (e.g. a kind node). No data point is reported for a limit set
+      to `max` (unlimited).
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+    attributes: [memory_limit_type]
+
+  k8s.node.memory.pressure.stall_time:
+    enabled: true
+    description: Time tasks on the node were stalled waiting on memory (reclaim, refault I/O), from the root cgroup's `memory.pressure` `total=`.
+    unit: s
+    stability: development
+    sum:
+      value_type: double
+      aggregation_temporality: cumulative
+      monotonic: true
+    attributes: [pressure_stall_type]
+
+  k8s.pod.memory.limit:
+    enabled: true
+    description: Memory limits of the pod cgroup, from `memory.high`, `memory.max` and `memory.swap.max`.
+    extended_documentation: >-
+      No data point is reported for a limit set to `max` (unlimited). The pod
+      `memory.max` is the sum of the container limits plus pod overhead, and is only set
+      when every container has a limit.
+    unit: By
+    stability: development
+    sum:
+      value_type: int
+      aggregation_temporality: cumulative
+      monotonic: false
+    attributes: [memory_limit_type]
+
+  k8s.pod.memory.pressure.stall_time:
+    enabled: true
+    description: Time tasks in the pod were stalled waiting on memory (reclaim, refault I/O), from the pod cgroup's `memory.pressure` `total=`.
+    unit: s
+    stability: development
+    sum:
+      value_type: double
+      aggregation_temporality: cumulative
+      monotonic: true
+    attributes: [pressure_stall_type]
