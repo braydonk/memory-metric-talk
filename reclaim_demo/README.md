@@ -31,7 +31,7 @@ go build -o reclaim_demo .
 sudo ./reclaim_demo --config demo.yaml   # edit collector_binary first
 ```
 
-In kind (the OTel `cgroup` scraper picks the instances up as extra cgroups):
+In kind (the [`cgroup` receiver](../cgroup_receiver) picks the instances up as extra cgroups):
 
 ```sh
 tilt up
@@ -55,7 +55,7 @@ Collector logs are in `<work_dir>/<name>/collector.log`.
 
 ## Metrics to watch
 
-From `memory.stat` of each instance (and the OTel cgroup scraper):
+From `memory.stat` of each instance (and the [`cgroup` receiver](../cgroup_receiver)):
 
 - usage (`memory.current`), working set (`usage - inactive_file`), rss (`anon`)
 - `memory.pressure`: stall time, what the `psi` policy reacts to
@@ -67,3 +67,9 @@ Throughput comes from the collectors themselves. If `telemetry_endpoint` is set,
 each one pushes its internal telemetry (`otelcol_receiver_accepted_metric_points`,
 heap, ...) over OTLP to it, with `k8s.container.name` set to the instance name.
 It's off by default.
+
+## Dashboard
+
+[`dashboard.json`](./dashboard.json) is the Grafana dashboard from the talk demo:
+one row per instance on the same scales. Import it with **Dashboards → New →
+Import** and pick the Prometheus data source with the metrics above.
